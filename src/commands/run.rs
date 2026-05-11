@@ -129,8 +129,14 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
     wait_for_task_trigger(task).await?;
     let mut previous_message = None;
     for action in &task.action {
-        println!("{action:?}");
+        println!("call {action}");
         previous_message = execute_action(client, peer, action, previous_message.as_ref()).await?;
+
+        if let Some(max_delay) = task.delay.filter(|delay| *delay > 0) {
+            let seconds = rand::random_range(1..=u64::from(max_delay));
+            println!("Waiting {seconds}s before action...");
+            sleep(Duration::from_secs(seconds)).await;
+        }
     }
 
     Ok(())
@@ -152,12 +158,6 @@ async fn wait_for_task_trigger(task: &Task) -> Result<()> {
             println!("Waiting until {next} for cron trigger...");
             sleep(wait).await;
         }
-    }
-
-    if let Some(max_delay) = task.delay.filter(|delay| *delay > 0) {
-        let seconds = rand::random_range(1..=u64::from(max_delay));
-        println!("Waiting {seconds}s before action...");
-        sleep(Duration::from_secs(seconds)).await;
     }
 
     Ok(())
@@ -297,6 +297,7 @@ async fn resolve_username_peer(client: &Client, value: &str) -> Result<Option<Pe
     }
 }
 
+//noinspection HttpUrlsUsage
 fn trim_username(value: &str) -> &str {
     value
         .trim()

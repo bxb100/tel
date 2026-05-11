@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt::{Debug, Display, Formatter};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
@@ -25,6 +26,19 @@ pub struct Action {
     pub dice: Option<DiceAction>,
     pub click: Option<ClickAction>,
     pub llm: Option<LlmAction>,
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let out: Box<dyn Debug> = match self {
+            Action { text: Some(a), .. } => Box::new(a),
+            Action { dice: Some(a), .. } => Box::new(a),
+            Action { click: Some(a), .. } => Box::new(a),
+            Action { llm: Some(a), .. } => Box::new(a),
+            Action { .. } => return Err(std::fmt::Error),
+        };
+        write!(f, "{out:?}")
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
