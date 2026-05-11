@@ -7,7 +7,7 @@ api_hash: `45ae393448c97ddbd6c74d02b31ea024`
 
 ### Login
 
-Log in and then store the necessary data, e.g., session string, user_id, name, etc.
+Log in and then store the necessary data, e.g., session file path, user_id, name, etc.
 
 ### Logout
 
@@ -39,6 +39,6 @@ action = [
 
 ### Run
 
-- user: `optional`, stored login user's id. If not provided, and session_string is not provided as well, it will use the first stored login data; fails when there are multiple logged-in users.
-- session_string: `optional`, if not logged in, should provide it.
+- user: `optional`, stored login user's id. If not provided, and session_path is not provided as well, it will use the first stored login data; fails when there are multiple logged-in users.
+- session_path: `optional`, path to an existing grammers SQLite session file. If not logged in through `tel login`, provide it with `--session-path`.
 - task: `optional`, if not provided, run all tasks.

@@ -1,13 +1,13 @@
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::time::Duration;
-use std::{env, fs};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use cron::Schedule;
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::PeerRef;
 use grammers_client::{Client, tl};
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::Duration;
+use std::{env, fs};
 use tokio::time::sleep;
 
 use crate::config::{Action, AppConfig, Task};
@@ -21,12 +21,12 @@ const CLICK_LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
 pub async fn execute(
     config_path: String,
     user: Option<i64>,
-    session_string: Option<String>,
+    session_path: Option<String>,
     task_filter: Option<String>,
 ) -> Result<()> {
     let config = load_config(&config_path)?;
     let tasks = select_tasks(&config, task_filter.as_deref())?;
-    let session_path = resolve_session_path(user, session_string.as_deref())?;
+    let session_path = resolve_session_path(user, session_path.as_deref())?;
 
     let connection = TelegramConnection::open(&session_path).await?;
     let result = run_tasks(&connection.client, tasks).await;
@@ -60,12 +60,12 @@ fn select_tasks<'a>(config: &'a AppConfig, task_filter: Option<&str>) -> Result<
     Ok(tasks)
 }
 
-fn resolve_session_path(user: Option<i64>, session_string: Option<&str>) -> Result<PathBuf> {
-    if let Some(session_string) = session_string {
-        let path = PathBuf::from(session_string);
+fn resolve_session_path(user: Option<i64>, session_path: Option<&str>) -> Result<PathBuf> {
+    if let Some(session_path) = session_path {
+        let path = PathBuf::from(session_path);
         ensure!(
             path.exists(),
-            "--session-string must point to an existing grammers SQLite session file"
+            "--session-path must point to an existing grammers SQLite session file"
         );
         return Ok(path);
     }
@@ -80,7 +80,7 @@ fn resolve_session_path(user: Option<i64>, session_string: Option<&str>) -> Resu
 
     let sessions = db.list_sessions()?;
     match sessions.as_slice() {
-        [] => bail!("no stored session; run `tel login` or pass --session-string"),
+        [] => bail!("no stored session; run `tel login` or pass --session-path"),
         [session] => stored_session_path(session.clone()),
         _ => bail!("multiple stored sessions; pass --user to select one"),
     }

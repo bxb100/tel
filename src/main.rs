@@ -34,8 +34,8 @@ enum Commands {
         #[arg(long)]
         user: Option<i64>,
         /// Path to a grammers SQLite session file
-        #[arg(long = "session-string", alias = "session-path")]
-        session_string: Option<String>,
+        #[arg(long = "session-path")]
+        session_path: Option<String>,
         /// Run only one task by name
         #[arg(long)]
         task: Option<String>,
@@ -61,9 +61,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Run {
             config,
             user,
-            session_string,
+            session_path,
             task,
-        } => run::execute(config.clone(), *user, session_string.clone(), task.clone()).await?,
+        } => run::execute(config.clone(), *user, session_path.clone(), task.clone()).await?,
     }
 
     Ok(())
