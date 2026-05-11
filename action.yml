@@ -1,0 +1,66 @@
+name: Run tel task
+description: Download the released tel binary and run task config TOML against a Telegram session.
+
+inputs:
+  task_data_url:
+    description: URL to the task config TOML text.
+    required: true
+  session_path:
+    description: Path to the grammers SQLite session file, or encrypted session file when decrypt_key is provided.
+    required: true
+  task_name:
+    description: Optional task name to run. Empty runs all tasks.
+    required: false
+    default: ""
+  decrypt_key:
+    description: Optional GPG passphrase used to decrypt the encrypted session file.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Mask decrypt key
+      if: ${{ inputs.decrypt_key != '' }}
+      shell: bash
+      env:
+        DECRYPT_KEY: ${{ inputs.decrypt_key }}
+      run: echo "::add-mask::${DECRYPT_KEY}"
+
+    - name: Write task config
+      shell: bash
+      env:
+        TASK_DATA_URL: ${{ inputs.task_data_url }}
+      run: "${GITHUB_ACTION_PATH}/scripts/write-task-config.sh"
+
+    - name: Download release binary
+      shell: bash
+      env:
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+        WORKFLOW_REPOSITORY: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+      run: "${GITHUB_ACTION_PATH}/scripts/download-release.sh"
+
+    - name: Resolve session file
+      id: session
+      shell: bash
+      env:
+        INPUT_SESSION_PATH: ${{ inputs.session_path }}
+        GPG_DECRYPT_KEY: ${{ inputs.decrypt_key }}
+      run: "${GITHUB_ACTION_PATH}/scripts/resolve-session.sh"
+
+    - name: Run task
+      shell: bash
+      env:
+        TASK_NAME: ${{ inputs.task_name }}
+        SESSION_PATH: ${{ steps.session.outputs.path }}
+      run: "${GITHUB_ACTION_PATH}/scripts/run-task.sh"
+
+    - name: Persist encrypted session
+      if: ${{ always() && inputs.decrypt_key != '' && steps.session.outputs.path != '' }}
+      shell: bash
+      env:
+        INPUT_SESSION_PATH: ${{ inputs.session_path }}
+        DECRYPTED_SESSION_PATH: ${{ steps.session.outputs.path }}
+        GPG_DECRYPT_KEY: ${{ inputs.decrypt_key }}
+      run: "${GITHUB_ACTION_PATH}/scripts/persist-session.sh"

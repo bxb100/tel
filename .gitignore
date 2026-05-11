@@ -1,0 +1,5 @@
+/target
+.tel/
+session.db
+mise.toml
+tasks.toml
