@@ -14,11 +14,12 @@ if [[ -n "${GPG_DECRYPT_KEY:-}" ]]; then
   cp "${INPUT_SESSION_PATH}" "${decrypted_session_path}"
   GPG_PASS_KEY="${GPG_DECRYPT_KEY}" "${GITHUB_ACTION_PATH}/scripts/decrypt.sh" "${decrypted_session_path}"
 
-  echo "path=${decrypted_session_path}" >> "${GITHUB_OUTPUT}"
+  echo "SESSION_PATH=${decrypted_session_path}" >> "${GITHUB_ENV}"
+  echo "DECRYPTED_SESSION_PATH=${decrypted_session_path}" >> "${GITHUB_ENV}"
 else
   if [[ ! -f "${INPUT_SESSION_PATH}" ]]; then
     echo "Session file not found: ${INPUT_SESSION_PATH}" >&2
     exit 1
   fi
-  echo "path=${INPUT_SESSION_PATH}" >> "${GITHUB_OUTPUT}"
+  echo "SESSION_PATH=${INPUT_SESSION_PATH}" >> "${GITHUB_ENV}"
 fi

@@ -6,6 +6,11 @@ if [[ -z "${TASK_DATA_URL:-}" ]]; then
   exit 2
 fi
 
+if [[ ! $TASK_DATA_URL =~ ^http ]]; then
+    mv "$TASK_DATA_URL" "$RUNNER_TEMP"
+    exit 0
+fi
+
 curl \
   --fail \
   --location \

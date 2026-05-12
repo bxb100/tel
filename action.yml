@@ -20,47 +20,47 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Mask decrypt key
-      if: ${{ inputs.decrypt_key != '' }}
+    - name: Prepare environment
       shell: bash
       env:
         DECRYPT_KEY: ${{ inputs.decrypt_key }}
-      run: echo "::add-mask::${DECRYPT_KEY}"
+        TASK_DATA_URL: ${{ inputs.task_data_url }}
+        ACTION_REPO: ${{ github.action_repository }}
+        WORKFLOW_REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+        INPUT_SESSION: ${{ inputs.session_path }}
+        TASK_NAME: ${{ inputs.task_name }}
+      run: |
+        if [[ -n "${DECRYPT_KEY}" ]]; then
+          echo "::add-mask::${DECRYPT_KEY}"
+          echo "GPG_DECRYPT_KEY=${DECRYPT_KEY}" >> "$GITHUB_ENV"
+        fi
+        cat >> "$GITHUB_ENV" <<EOF
+        TASK_DATA_URL=${TASK_DATA_URL}
+        ACTION_REPOSITORY=${ACTION_REPO}
+        WORKFLOW_REPOSITORY=${WORKFLOW_REPO}
+        GH_TOKEN=${GH_TOKEN}
+        INPUT_SESSION_PATH=${INPUT_SESSION}
+        TASK_NAME=${TASK_NAME}
+        EOF
 
     - name: Write task config
       shell: bash
-      env:
-        TASK_DATA_URL: ${{ inputs.task_data_url }}
       run: "${GITHUB_ACTION_PATH}/scripts/write-task-config.sh"
 
     - name: Download release binary
       shell: bash
-      env:
-        ACTION_REPOSITORY: ${{ github.action_repository }}
-        WORKFLOW_REPOSITORY: ${{ github.repository }}
-        GH_TOKEN: ${{ github.token }}
       run: "${GITHUB_ACTION_PATH}/scripts/download-release.sh"
 
     - name: Resolve session file
-      id: session
       shell: bash
-      env:
-        INPUT_SESSION_PATH: ${{ inputs.session_path }}
-        GPG_DECRYPT_KEY: ${{ inputs.decrypt_key }}
       run: "${GITHUB_ACTION_PATH}/scripts/resolve-session.sh"
 
     - name: Run task
       shell: bash
-      env:
-        TASK_NAME: ${{ inputs.task_name }}
-        SESSION_PATH: ${{ steps.session.outputs.path }}
       run: "${GITHUB_ACTION_PATH}/scripts/run-task.sh"
 
     - name: Persist encrypted session
-      if: ${{ always() && inputs.decrypt_key != '' && steps.session.outputs.path != '' }}
+      if: ${{ always() && inputs.decrypt_key != '' && env.DECRYPTED_SESSION_PATH != '' }}
       shell: bash
-      env:
-        INPUT_SESSION_PATH: ${{ inputs.session_path }}
-        DECRYPTED_SESSION_PATH: ${{ steps.session.outputs.path }}
-        GPG_DECRYPT_KEY: ${{ inputs.decrypt_key }}
       run: "${GITHUB_ACTION_PATH}/scripts/persist-session.sh"
