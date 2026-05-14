@@ -110,9 +110,12 @@ async fn run_tasks(client: &Client, tasks: Vec<&Task>) -> Result<()> {
     );
 
     for task in tasks {
-        run_task(client, task)
-            .await
-            .with_context(|| format!("task failed: {}", task.name))?;
+        match run_task(client, task).await {
+            Err(error) => {
+                eprintln!("task {} failed: {}", task.name, error);
+            }
+            Ok(_) => {}
+        }
     }
 
     Ok(())
@@ -129,7 +132,6 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
     wait_for_task_trigger(task).await?;
     let mut previous_message = None;
     for action in &task.action {
-        println!("call {action}");
         previous_message = execute_action(client, peer, action, previous_message.as_ref()).await?;
 
         if let Some(max_delay) = task.delay.filter(|delay| *delay > 0) {
