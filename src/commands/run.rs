@@ -26,7 +26,7 @@ pub async fn execute(
 ) -> Result<()> {
     let config = load_config(&config_path)?;
     let tasks = select_tasks(&config, task_filter.as_deref())?;
-    let session_path = resolve_session_path(user, session_path.as_deref())?;
+    let session_path = resolve_session_path(user, session_path)?;
 
     let connection = TelegramConnection::open(&session_path).await?;
     let result = run_tasks(&connection.client, tasks).await;
@@ -60,14 +60,17 @@ fn select_tasks<'a>(config: &'a AppConfig, task_filter: Option<&str>) -> Result<
     Ok(tasks)
 }
 
-fn resolve_session_path(user: Option<i64>, session_path: Option<&str>) -> Result<PathBuf> {
-    if let Some(session_path) = session_path {
-        let path = PathBuf::from(session_path);
-        ensure!(
-            path.exists(),
-            "--session-path must point to an existing grammers SQLite session file"
-        );
-        return Ok(path);
+fn resolve_session_path(user: Option<i64>, session_path: Option<String>) -> Result<PathBuf> {
+    match (env::var("SESSION_PATH"), session_path) {
+        (Ok(path), _) | (_, Some(path)) => {
+            let path = PathBuf::from(path);
+            ensure!(
+                path.exists(),
+                "--session-path must point to an existing grammers SQLite session file"
+            );
+            return Ok(path);
+        }
+        _ => {}
     }
 
     let db = Db::new()?;
