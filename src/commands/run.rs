@@ -261,7 +261,7 @@ async fn find_dialog_peer(
         let peer = dialog.peer();
 
         if let Some(chat_id) = chat_id {
-            let id_matches = dialog.peer_id().bot_api_dialog_id().to_string() == chat_id;
+            let id_matches = dialog.peer_id().bot_api_dialog_id_unchecked().to_string() == chat_id;
             let username_matches = peer
                 .username()
                 .is_some_and(|username| username.eq_ignore_ascii_case(trim_username(chat_id)));
@@ -295,7 +295,7 @@ async fn resolve_username_peer(client: &Client, value: &str) -> Result<Option<Pe
 
     let peer = client.resolve_username(username).await?;
     match peer {
-        Some(peer) => Ok(Some(peer.to_ref().await.with_context(|| {
+        Some(peer) => Ok(Some(peer.to_ref().await.unwrap().with_context(|| {
             format!("resolved @{username}, but it cannot be used as a peer")
         })?)),
         None => Ok(None),
@@ -428,24 +428,27 @@ fn find_inline_button(
 }
 
 fn find_inline_button_in_rows(
-    rows: &[tl::enums::KeyboardButtonRow],
+    rows: &[tl::enums::KeyboardInlineButtonRow],
     key: &str,
 ) -> Option<InlineButtonMatch> {
     for row in rows {
         match row {
-            tl::enums::KeyboardButtonRow::Row(row) => {
+            tl::enums::KeyboardInlineButtonRow::Row(row) => {
                 for button in &row.buttons {
-                    let text = button.text();
-                    if text != key {
-                        continue;
-                    }
+                    match button {
+                        tl::enums::KeyboardInlineButton::Button(button) => {
+                            if button.text != key {
+                                continue;
+                            }
 
-                    return match button {
-                        tl::enums::KeyboardButton::Callback(button) => {
-                            Some(InlineButtonMatch::Callback(button.data.clone()))
+                            return match &button.r#type {
+                                tl::enums::InlineButtonType::Callback(callback) => {
+                                    Some(InlineButtonMatch::Callback(callback.data.clone()))
+                                }
+                                _ => Some(InlineButtonMatch::Unsupported(button.text.clone())),
+                            };
                         }
-                        _ => Some(InlineButtonMatch::Unsupported(text)),
-                    };
+                    }
                 }
             }
         }
@@ -635,14 +638,19 @@ mod tests {
     #[test]
     fn finds_inline_callback_button_by_text() {
         let markup = tl::types::ReplyInlineMarkup {
+            force_reply: false,
             rows: vec![
-                tl::types::KeyboardButtonRow {
+                tl::types::KeyboardInlineButtonRow {
                     buttons: vec![
-                        tl::types::KeyboardButtonCallback {
-                            requires_password: false,
+                        tl::types::KeyboardInlineButton {
                             style: None,
                             text: "🎯 签到".to_string(),
-                            data: b"checkin".to_vec(),
+                            r#type: tl::enums::InlineButtonType::Callback(
+                                tl::types::InlineButtonTypeCallback {
+                                    requires_password: false,
+                                    data: b"checkin".to_vec(),
+                                },
+                            ),
                         }
                         .into(),
                     ],
@@ -666,12 +674,14 @@ mod tests {
             single_use: false,
             selective: false,
             persistent: false,
+            force_reply: false,
             rows: vec![
                 tl::types::KeyboardButtonRow {
                     buttons: vec![
                         tl::types::KeyboardButton {
                             style: None,
                             text: "🎯 签到".to_string(),
+                            r#type: tl::enums::ButtonType::Default,
                         }
                         .into(),
                     ],

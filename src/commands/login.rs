@@ -31,7 +31,7 @@ pub async fn execute() -> anyhow::Result<()> {
 
     let db = Db::new()?;
     let session_data = SessionData {
-        user_id: signed_in.id().bare_id(),
+        user_id: signed_in.id().bare_id_unchecked(),
         name: signed_in.full_name(),
         session_path: session_path.to_string_lossy().into_owned(),
     };

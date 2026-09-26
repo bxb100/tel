@@ -11,7 +11,7 @@ use grammers_session::types::{
 };
 use grammers_session::{Session, SessionData};
 use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, named_params, params};
 
 const USER_SELF: i64 = 1;
 const USER_BOT: i64 = 2;
@@ -19,6 +19,7 @@ const USER_SELF_BOT: i64 = 3;
 const MEGAGROUP: i64 = 4;
 const BROADCAST: i64 = 8;
 const GIGAGROUP: i64 = 12;
+const COMMUNITY: i64 = 16;
 
 pub struct RusqliteSession {
     conn: Mutex<Connection>,
@@ -65,36 +66,69 @@ impl RusqliteSession {
     }
 }
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum SessionStoreError {
+    #[error("it should be not happen")]
+    NeverHappen,
+}
+
 impl Session for RusqliteSession {
-    fn home_dc_id(&self) -> i32 {
-        self.cache.lock().unwrap().home_dc
+    type Error = SessionStoreError;
+
+    fn home_dc_id(&self) -> Result<i32, Self::Error> {
+        let sc = self
+            .cache
+            .lock()
+            .map_err(|_| SessionStoreError::NeverHappen)?;
+
+        Ok(sc.home_dc)
     }
 
-    fn set_home_dc_id(&self, dc_id: i32) -> BoxFuture<'_, ()> {
-        {
-            self.cache.lock().unwrap().home_dc = dc_id;
-            let conn = self.conn.lock().unwrap();
-            conn.execute("DELETE FROM dc_home", []).unwrap();
-            conn.execute("INSERT INTO dc_home VALUES (?1)", [dc_id])
-                .unwrap();
-        }
-        Box::pin(async {})
-    }
-
-    fn dc_option(&self, dc_id: i32) -> Option<DcOption> {
-        self.cache.lock().unwrap().dc_options.get(&dc_id).cloned()
-    }
-
-    fn set_dc_option(&self, dc_option: &DcOption) -> BoxFuture<'_, ()> {
-        {
+    fn set_home_dc_id(&self, dc_id: i32) -> BoxFuture<'_, Result<(), Self::Error>> {
+        Box::pin(async move {
             self.cache
                 .lock()
-                .unwrap()
+                .map_err(|_| SessionStoreError::NeverHappen)?
+                .home_dc = dc_id;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| SessionStoreError::NeverHappen)?;
+            conn.execute("DELETE FROM dc_home", [])
+                .map_err(|_| SessionStoreError::NeverHappen)?;
+            conn.execute("INSERT INTO dc_home VALUES (?1)", [dc_id])
+                .map_err(|_| SessionStoreError::NeverHappen)?;
+
+            Ok(())
+        })
+    }
+
+    fn dc_option(&self, dc_id: i32) -> Result<Option<DcOption>, Self::Error> {
+        let sc = self
+            .cache
+            .lock()
+            .map_err(|_| SessionStoreError::NeverHappen)?;
+
+        Ok(sc.dc_options.get(&dc_id).cloned())
+    }
+
+    fn set_dc_option(&self, dc_option: &DcOption) -> BoxFuture<'_, Result<(), Self::Error>> {
+        let dc_option = dc_option.clone();
+
+        Box::pin(async move {
+            self.cache
+                .lock()
+                .map_err(|_| SessionStoreError::NeverHappen)?
                 .dc_options
                 .insert(dc_option.id, dc_option.clone());
 
             let auth_key = dc_option.auth_key.map(Vec::from);
-            let conn = self.conn.lock().unwrap();
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| SessionStoreError::NeverHappen)?;
             conn.execute(
                 "INSERT OR REPLACE INTO dc_option VALUES (?1, ?2, ?3, ?4)",
                 params![
@@ -104,97 +138,124 @@ impl Session for RusqliteSession {
                     auth_key
                 ],
             )
-            .unwrap();
-        }
-        Box::pin(async {})
+            .map_err(|_| SessionStoreError::NeverHappen)?;
+
+            Ok(())
+        })
     }
 
-    fn peer(&self, peer: PeerId) -> BoxFuture<'_, Option<PeerInfo>> {
-        let result = {
-            let conn = self.conn.lock().unwrap();
-            if peer.kind() == PeerKind::UserSelf {
-                conn.query_row(
-                    "SELECT peer_id, hash, subtype FROM peer_info WHERE subtype & ?1 != 0 LIMIT 1",
-                    [USER_SELF],
-                    |row| map_peer_info(row, peer),
-                )
-                .optional()
-                .unwrap()
-            } else {
-                conn.query_row(
-                    "SELECT peer_id, hash, subtype FROM peer_info WHERE peer_id = ?1 LIMIT 1",
-                    [peer.bot_api_dialog_id()],
-                    |row| map_peer_info(row, peer),
-                )
-                .optional()
-                .unwrap()
-            }
-        };
-        Box::pin(async move { result })
+    fn peer(&self, peer: PeerId) -> BoxFuture<'_, Result<Option<PeerInfo>, Self::Error>> {
+        Box::pin(async move {
+            let result = {
+                let conn = self
+                    .conn
+                    .lock()
+                    .map_err(|_| SessionStoreError::NeverHappen)?;
+
+                if let Some(peer_id) = peer.bot_api_dialog_id() {
+                    conn.query_row(
+                        "SELECT peer_id, hash, subtype FROM peer_info WHERE peer_id = :peer_id LIMIT 1",
+                        named_params! {":peer_id": peer_id},
+                        |row| map_peer_info(row, peer),
+                    )
+                        .optional()
+                        .map_err(|_| SessionStoreError::NeverHappen)?
+                } else {
+                    // `peer` is the self-user sentinel; look up the row flagged as self.
+                    conn.query_row(
+                        "SELECT peer_id, hash, subtype FROM peer_info WHERE subtype & :subtype != 0 LIMIT 1",
+                        named_params! {":subtype": USER_SELF},
+                        |row| map_peer_info(row, peer),
+                    )
+                        .optional()
+                        .map_err(|_| SessionStoreError::NeverHappen)?
+                }
+            };
+            Ok(result)
+        })
     }
 
-    fn cache_peer(&self, peer: &PeerInfo) -> BoxFuture<'_, ()> {
-        {
-            let subtype = peer_subtype(peer);
-            let auth = peer.auth().map(|auth| auth.hash());
-            let conn = self.conn.lock().unwrap();
+    fn cache_peer(&self, peer: PeerInfo) -> BoxFuture<'_, Result<(), Self::Error>> {
+        let subtype = peer_subtype(&peer);
+        let auth = peer.auth().map(|auth| auth.hash());
+        let dialog_id = peer.id().bot_api_dialog_id();
+
+        Box::pin(async move {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| SessionStoreError::NeverHappen)?;
+
             conn.execute(
                 "INSERT OR REPLACE INTO peer_info VALUES (?1, ?2, ?3)",
-                params![peer.id().bot_api_dialog_id(), auth, subtype],
+                params![dialog_id, auth, subtype],
             )
-            .unwrap();
-        }
-        Box::pin(async {})
+            .map_err(|_| SessionStoreError::NeverHappen)?;
+            Ok(())
+        })
     }
 
-    fn updates_state(&self) -> BoxFuture<'_, UpdatesState> {
-        let state = {
-            let conn = self.conn.lock().unwrap();
-            let mut state = conn
-                .query_row(
-                    "SELECT pts, qts, date, seq FROM update_state LIMIT 1",
-                    [],
-                    |row| {
-                        Ok(UpdatesState {
-                            pts: row.get(0)?,
-                            qts: row.get(1)?,
-                            date: row.get(2)?,
-                            seq: row.get(3)?,
-                            channels: Vec::new(),
+    fn updates_state(&self) -> BoxFuture<'_, Result<UpdatesState, Self::Error>> {
+        Box::pin(async move {
+            let state = {
+                let conn = self
+                    .conn
+                    .lock()
+                    .map_err(|_| SessionStoreError::NeverHappen)?;
+                let mut state = conn
+                    .query_row(
+                        "SELECT pts, qts, date, seq FROM update_state LIMIT 1",
+                        [],
+                        |row| {
+                            Ok(UpdatesState {
+                                pts: row.get(0)?,
+                                qts: row.get(1)?,
+                                date: row.get(2)?,
+                                seq: row.get(3)?,
+                                channels: Vec::new(),
+                            })
+                        },
+                    )
+                    .optional()
+                    .map_err(|_| SessionStoreError::NeverHappen)?
+                    .unwrap_or_default();
+
+                let mut stmt = conn
+                    .prepare("SELECT peer_id, pts FROM channel_state")
+                    .map_err(|_| SessionStoreError::NeverHappen)?;
+
+                let channels = stmt
+                    .query_map([], |row| {
+                        Ok(ChannelState {
+                            id: row.get(0)?,
+                            pts: row.get(1)?,
                         })
-                    },
-                )
-                .optional()
-                .unwrap()
-                .unwrap_or_default();
-
-            let mut stmt = conn
-                .prepare("SELECT peer_id, pts FROM channel_state")
-                .unwrap();
-            let channels = stmt
-                .query_map([], |row| {
-                    Ok(ChannelState {
-                        id: row.get(0)?,
-                        pts: row.get(1)?,
                     })
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap();
-            state.channels = channels;
-            state
-        };
-        Box::pin(async move { state })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|_| SessionStoreError::NeverHappen)?;
+
+                state.channels = channels;
+                state
+            };
+            Ok(state)
+        })
     }
 
-    fn set_update_state(&self, update: UpdateState) -> BoxFuture<'_, ()> {
-        {
-            let mut conn = self.conn.lock().unwrap();
-            let tx = conn.transaction().unwrap();
+    fn set_update_state(&self, update: UpdateState) -> BoxFuture<'_, Result<(), Self::Error>> {
+        Box::pin(async move {
+            let mut conn = self
+                .conn
+                .lock()
+                .map_err(|_| SessionStoreError::NeverHappen)?;
+            let tx = conn
+                .transaction()
+                .map_err(|_| SessionStoreError::NeverHappen)?;
 
             match update {
                 UpdateState::All(updates_state) => {
-                    tx.execute("DELETE FROM update_state", []).unwrap();
+                    tx.execute("DELETE FROM update_state", [])
+                        .map_err(|_| SessionStoreError::NeverHappen)?;
                     tx.execute(
                         "INSERT INTO update_state VALUES (?1, ?2, ?3, ?4)",
                         params![
@@ -204,42 +265,43 @@ impl Session for RusqliteSession {
                             updates_state.seq
                         ],
                     )
-                    .unwrap();
+                    .map_err(|_| SessionStoreError::NeverHappen)?;
 
-                    tx.execute("DELETE FROM channel_state", []).unwrap();
+                    tx.execute("DELETE FROM channel_state", [])
+                        .map_err(|_| SessionStoreError::NeverHappen)?;
                     for channel in updates_state.channels {
                         tx.execute(
                             "INSERT INTO channel_state VALUES (?1, ?2)",
                             params![channel.id, channel.pts],
                         )
-                        .unwrap();
+                        .map_err(|_| SessionStoreError::NeverHappen)?;
                     }
                 }
                 UpdateState::Primary { pts, date, seq } => {
-                    upsert_update_state(&tx).unwrap();
+                    upsert_update_state(&tx).map_err(|_| SessionStoreError::NeverHappen)?;
                     tx.execute(
                         "UPDATE update_state SET pts = ?1, date = ?2, seq = ?3",
                         params![pts, date, seq],
                     )
-                    .unwrap();
+                    .map_err(|_| SessionStoreError::NeverHappen)?;
                 }
                 UpdateState::Secondary { qts } => {
                     upsert_update_state(&tx).unwrap();
                     tx.execute("UPDATE update_state SET qts = ?1", [qts])
-                        .unwrap();
+                        .map_err(|_| SessionStoreError::NeverHappen)?;
                 }
                 UpdateState::Channel { id, pts } => {
                     tx.execute(
                         "INSERT OR REPLACE INTO channel_state VALUES (?1, ?2)",
                         params![id, pts],
                     )
-                    .unwrap();
+                    .map_err(|_| SessionStoreError::NeverHappen)?;
                 }
             }
 
-            tx.commit().unwrap();
-        }
-        Box::pin(async {})
+            tx.commit().map_err(|_| SessionStoreError::NeverHappen)?;
+            Ok(())
+        })
     }
 }
 
@@ -315,17 +377,17 @@ fn map_peer_info(row: &rusqlite::Row<'_>, requested: PeerId) -> rusqlite::Result
     let subtype = row.get::<_, Option<i64>>(2)?;
 
     Ok(match requested.kind() {
-        PeerKind::User | PeerKind::UserSelf => PeerInfo::User {
-            id: PeerId::user_unchecked(peer_id).bare_id(),
+        PeerKind::User => PeerInfo::User {
+            id: PeerId::user_unchecked(peer_id).bare_id_unchecked(),
             auth,
             bot: subtype.map(|subtype| subtype & USER_BOT != 0),
             is_self: subtype.map(|subtype| subtype & USER_SELF != 0),
         },
         PeerKind::Chat => PeerInfo::Chat {
-            id: requested.bare_id(),
+            id: requested.bare_id_unchecked(),
         },
         PeerKind::Channel => PeerInfo::Channel {
-            id: requested.bare_id(),
+            id: requested.bare_id_unchecked(),
             auth,
             kind: subtype.and_then(channel_kind_from_subtype),
         },
@@ -347,12 +409,15 @@ fn peer_subtype(peer: &PeerInfo) -> Option<i64> {
             ChannelKind::Megagroup => MEGAGROUP,
             ChannelKind::Broadcast => BROADCAST,
             ChannelKind::Gigagroup => GIGAGROUP,
+            ChannelKind::Community => COMMUNITY,
         }),
     }
 }
 
 fn channel_kind_from_subtype(subtype: i64) -> Option<ChannelKind> {
-    if subtype & GIGAGROUP == GIGAGROUP {
+    if subtype & COMMUNITY == COMMUNITY {
+        Some(ChannelKind::Community)
+    } else if subtype & GIGAGROUP == GIGAGROUP {
         Some(ChannelKind::Gigagroup)
     } else if subtype & BROADCAST != 0 {
         Some(ChannelKind::Broadcast)
@@ -381,9 +446,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn persists_self_peer_without_libsql() {
-        let session = RusqliteSession::open(":memory:").unwrap();
-        assert_eq!(session.peer(PeerId::self_user()).await, None);
+    async fn persists_self_peer_without_libsql() -> Result<()> {
+        let session = RusqliteSession::open(":memory:")?;
+        assert_eq!(session.peer(PeerId::self_user()).await?, None);
 
         let peer = PeerInfo::User {
             id: 1,
@@ -391,10 +456,18 @@ mod tests {
             bot: Some(false),
             is_self: Some(true),
         };
-        session.cache_peer(&peer).await;
+        session.cache_peer(peer.clone()).await?;
 
-        assert_eq!(session.peer(PeerId::self_user()).await, Some(peer.clone()));
-        assert_eq!(session.peer(PeerId::user_unchecked(1)).await, Some(peer));
+        assert_eq!(
+            session.peer(PeerId::self_user()).await?.as_ref(),
+            Some(&peer)
+        );
+        assert_eq!(
+            session.peer(PeerId::user_unchecked(1)).await?.as_ref(),
+            Some(&peer)
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -417,19 +490,23 @@ mod tests {
     }
 
     #[test]
-    fn update_state_upsert_keeps_existing_secondary_state() {
-        let session = RusqliteSession::open(":memory:").unwrap();
-        futures::executor::block_on(session.set_update_state(UpdateState::Secondary { qts: 7 }));
-        futures::executor::block_on(session.set_update_state(UpdateState::Primary {
+    fn update_state_upsert_keeps_existing_secondary_state() -> Result<()> {
+        let session = RusqliteSession::open(":memory:")?;
+        let _ = futures::executor::block_on(
+            session.set_update_state(UpdateState::Secondary { qts: 7 }),
+        );
+        let _ = futures::executor::block_on(session.set_update_state(UpdateState::Primary {
             pts: 1,
             date: 2,
             seq: 3,
         }));
 
-        let state = futures::executor::block_on(session.updates_state());
+        let state = futures::executor::block_on(session.updates_state())?;
         assert_eq!(state.pts, 1);
         assert_eq!(state.qts, 7);
         assert_eq!(state.date, 2);
         assert_eq!(state.seq, 3);
+
+        Ok(())
     }
 }

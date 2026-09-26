@@ -1,5 +1,7 @@
 /target
 .tel/
 session.db
-mise.toml
+session
 tasks.toml
+.env
+.alma-snapshots
