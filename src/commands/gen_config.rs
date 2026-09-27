@@ -1,7 +1,8 @@
 use crate::config::{
-    Action, AppConfig, ClickAction, DiceAction, LlmAction, Task, TextAction, to_inline_toml,
+    Action, AppConfig, BrowserlessAction, ClickAction, DiceAction, LlmAction, Task, TextAction,
+    to_inline_toml,
 };
-use inquire::{Confirm, Select, Text};
+use inquire::{Confirm, Editor, Select, Text};
 use std::fs;
 
 pub async fn execute_task() -> anyhow::Result<()> {
@@ -22,8 +23,11 @@ pub async fn execute_task() -> anyhow::Result<()> {
 
         let mut actions = Vec::new();
         loop {
-            let action_type =
-                Select::new("Action type:", vec!["text", "dice", "click", "llm"]).prompt()?;
+            let action_type = Select::new(
+                "Action type:",
+                vec!["text", "dice", "click", "llm", "browserless"],
+            )
+            .prompt()?;
 
             let mut action = Action::default();
 
@@ -46,6 +50,27 @@ pub async fn execute_task() -> anyhow::Result<()> {
                 "llm" => {
                     let prompt = Text::new("LLM Prompt:").prompt()?;
                     action.llm = Some(LlmAction { prompt });
+                }
+                "browserless" => {
+                    let token = Text::new("Browserless token:").prompt()?;
+                    let query = Editor::new("BQL query (press 'e' to open your editor):")
+                        .with_file_extension("graphql")
+                        .prompt()?;
+                    let operation_name = Text::new("Operation name:")
+                        .with_placeholder("NewTab")
+                        .prompt()?;
+                    let url = Text::new("Browserless URL (optional):")
+                        .with_placeholder("https://production-sfo.browserless.io/stealth/bql")
+                        .prompt_skippable()?;
+
+                    let browserless = BrowserlessAction {
+                        token,
+                        query,
+                        operation_name,
+                        url,
+                    };
+
+                    action.browserless = Some(browserless);
                 }
                 _ => unreachable!(),
             }
@@ -78,10 +103,10 @@ pub async fn execute_task() -> anyhow::Result<()> {
     }
 
     let mut config = AppConfig { task: Vec::new() };
-    if let Ok(content) = fs::read_to_string("tasks.toml") {
-        if let Ok(mut existing_config) = toml::from_str::<AppConfig>(&content) {
-            config.task.append(&mut existing_config.task);
-        }
+    if let Ok(content) = fs::read_to_string("tasks.toml")
+        && let Ok(mut existing_config) = toml::from_str::<AppConfig>(&content)
+    {
+        config.task.append(&mut existing_config.task);
     }
 
     config.task.extend(tasks);

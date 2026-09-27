@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::Debug;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
@@ -26,19 +26,7 @@ pub struct Action {
     pub dice: Option<DiceAction>,
     pub click: Option<ClickAction>,
     pub llm: Option<LlmAction>,
-}
-
-impl Display for Action {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let out: Box<dyn Debug> = match self {
-            Action { text: Some(a), .. } => Box::new(a),
-            Action { dice: Some(a), .. } => Box::new(a),
-            Action { click: Some(a), .. } => Box::new(a),
-            Action { llm: Some(a), .. } => Box::new(a),
-            Action { .. } => return Err(std::fmt::Error),
-        };
-        write!(f, "{out:?}")
-    }
+    pub browserless: Option<BrowserlessAction>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -63,6 +51,25 @@ pub struct ClickAction {
 #[serde(deny_unknown_fields)]
 pub struct LlmAction {
     pub prompt: String,
+}
+
+/// Browserless browser action executed through a Browserless BQL (GraphQL) endpoint.
+///
+/// Mirrors the shape of the documented curl request:
+/// `POST https://production-sfo.browserless.io/stealth/bql?token=<token>&proxy=residential&blockConsentModals=true`
+/// with a JSON body of `{ "query": ..., "variables": ..., "operationName": ... }`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserlessAction {
+    /// Browserless token appended to the request URL.
+    pub token: String,
+    /// BQL (GraphQL) query/mutation text.
+    pub query: String,
+    /// Optional GraphQL operation name.
+    pub operation_name: String,
+    /// Override the Browserless endpoint (defaults to production-sfo stealth BQL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 pub fn to_inline_toml(config: &AppConfig) -> Result<String, String> {
@@ -129,6 +136,22 @@ fn push_inline_action(output: &mut String, action: &Action) -> Result<(), String
         action_count += 1;
         output.push_str("{ llm = { prompt = ");
         output.push_str(&toml_string(&llm.prompt));
+        output.push_str(" } }");
+    }
+
+    if let Some(browserless) = action.browserless.as_ref() {
+        action_count += 1;
+        output.push_str("{ browserless = { token = ");
+        output.push_str(&toml_string(&browserless.token));
+        output.push_str(", query = ");
+        output.push_str(&toml_string(&browserless.query));
+        output.push_str(", operation_name = ");
+        output.push_str(&toml_string(browserless.operation_name.as_ref()));
+
+        if let Some(url) = browserless.url.as_ref() {
+            output.push_str(", url = ");
+            output.push_str(&toml_string(url));
+        }
         output.push_str(" } }");
     }
 
@@ -209,6 +232,35 @@ mod tests {
         let output = to_inline_toml(&config).expect("config should serialize");
         assert!(output.contains("action = [\n  { text = { text = \"hello\" } },\n]"));
         assert!(!output.contains("[[task.action]]"));
+    }
+
+    #[test]
+    fn parses_and_serializes_browserless_action() {
+        let config = toml::from_str::<AppConfig>(
+            r#"
+            [[task]]
+            name = "task_name"
+            chat_id = "123"
+            action = [
+              { browserless = { token = "tok", query = "mutation zpr($url: String!) { goto(url: $url) { status } }", operation_name = "zpr" } },
+            ]
+            "#,
+        )
+        .expect("browserless task config should parse");
+
+        let action = config.task[0].action[0].browserless.as_ref().unwrap();
+        assert_eq!(action.token, "tok");
+        assert_eq!(action.operation_name, "zpr");
+        assert_eq!(action.url, None);
+
+        let output = to_inline_toml(&config).expect("browserless config should serialize");
+        assert!(output.contains("browserless = { token = \"tok\""));
+        assert!(output.contains("operation_name = \"zpr\""));
+
+        let reparsed = toml::from_str::<AppConfig>(&output).expect("roundtrip should parse");
+        let action = reparsed.task[0].action[0].browserless.as_ref().unwrap();
+        assert_eq!(action.token, "tok");
+        assert_eq!(action.operation_name, "zpr");
     }
 
     #[test]

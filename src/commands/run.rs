@@ -1,18 +1,21 @@
-use anyhow::{Context, Result, bail, ensure};
+use crate::config::{AppConfig, BrowserlessAction, Task};
+use crate::db::{Db, SessionData};
+use crate::telegram::TelegramConnection;
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::Utc;
 use cron::Schedule;
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::PeerRef;
+use grammers_client::tl::types::InlineButtonTypeUrl;
 use grammers_client::{Client, tl};
+use regex_lite::Regex;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use std::time::Duration;
 use std::{env, fs};
 use tokio::time::sleep;
-
-use crate::config::{Action, AppConfig, Task};
-use crate::db::{Db, SessionData};
-use crate::telegram::TelegramConnection;
+use tracing::debug;
 
 const CLICK_LOOKUP_LIMIT: usize = 30;
 const CLICK_LOOKUP_ATTEMPTS: usize = 15;
@@ -113,11 +116,10 @@ async fn run_tasks(client: &Client, tasks: Vec<&Task>) -> Result<()> {
     );
 
     for task in tasks {
-        match run_task(client, task).await {
-            Err(error) => {
-                eprintln!("task {} failed: {}", task.name, error);
-            }
-            Ok(_) => {}
+        if let Err(error) = run_task(client, task).await {
+            eprintln!("task {} failed: {}", task.name, error);
+        } else {
+            println!("✔️ Done!");
         }
     }
 
@@ -133,9 +135,50 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
 
     let peer = resolve_task_peer(client, task).await?;
     wait_for_task_trigger(task).await?;
+
+    // State threaded between actions:
+    // - the last sent message, so `click` can look for buttons on it
+    // - the last URL opened via an inline URL button, consumed by `browserless` as variables.url
     let mut previous_message = None;
+    let mut last_url = None;
+
     for action in &task.action {
-        previous_message = execute_action(client, peer, action, previous_message.as_ref()).await?;
+        let bodies = action.text.is_some() as usize
+            + action.dice.is_some() as usize
+            + action.click.is_some() as usize
+            + action.llm.is_some() as usize
+            + action.browserless.is_some() as usize;
+        match bodies {
+            0 => bail!("task action must contain one action body"),
+            1 => {}
+            _ => bail!("task action must contain only one action body"),
+        }
+
+        if let Some(text) = &action.text {
+            previous_message = Some(client.send_message(peer, text.text.as_str()).await?);
+            last_url = None;
+        } else if let Some(dice) = &action.dice {
+            let message = InputMessage::new().media(tl::types::InputMediaDice {
+                emoticon: dice.dice.clone(),
+            });
+            previous_message = Some(client.send_message(peer, message).await?);
+            last_url = None;
+        } else if let Some(click) = &action.click {
+            last_url =
+                click_inline_keyboard(client, peer, &click.key, previous_message.as_ref()).await?;
+            previous_message = None;
+        } else if let Some(llm) = &action.llm {
+            previous_message =
+                execute_llm_action(client, peer, &llm.prompt, previous_message.as_ref()).await?;
+            last_url = None;
+        } else if let Some(browserless) = &action.browserless {
+            let url = match last_url.take() {
+                Some(url) => Some(resolve_url_if_miniapp(client, &url).await?),
+                None => None,
+            };
+            execute_browserless_action(browserless, url).await?;
+            previous_message = None;
+        }
 
         if let Some(max_delay) = task.delay.filter(|delay| *delay > 0) {
             let seconds = rand::random_range(1..=u64::from(max_delay));
@@ -145,6 +188,79 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
     }
 
     Ok(())
+}
+
+struct MiniappLink {
+    bot: String,
+    short_name: String,
+    start_param: Option<String>,
+}
+
+static MINIAPP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^https?://t\.me/(?P<bot>[^/?#]+)/(?P<app>[^/?#]+)(?:[?#]|$)").unwrap()
+});
+static STARTAPP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[?&]startapp=(?P<v>[^&#]*)").unwrap());
+
+fn parse_miniapp_link(url: &str) -> Option<MiniappLink> {
+    let caps = MINIAPP_RE.captures(url.trim())?;
+    let short_name = &caps["app"];
+    if short_name.bytes().all(|b| b.is_ascii_digit()) {
+        return None; // t.me/频道/123 是帖子链接，不是 miniapp
+    }
+    let start_param = STARTAPP_RE
+        .captures(url)
+        .map(|c| c["v"].to_string())
+        .filter(|v| !v.is_empty());
+    Some(MiniappLink {
+        bot: caps["bot"].to_string(),
+        short_name: short_name.to_string(),
+        start_param,
+    })
+}
+
+async fn resolve_url_if_miniapp(client: &Client, url: &str) -> Result<String> {
+    let Some(link) = parse_miniapp_link(url) else {
+        return Ok(url.to_string()); // 不是 miniapp 链接，原样返回
+    };
+
+    let peer = client
+        .resolve_username(&link.bot)
+        .await
+        .with_context(|| format!("failed to resolve miniapp bot @{}", link.bot))?
+        .with_context(|| format!("miniapp bot @{} not found", link.bot))?;
+    let bot_ref = peer
+        .to_ref()
+        .await
+        .map_err(|err| anyhow!("{}", err))?
+        .with_context(|| format!("cannot use @{} as a peer", link.bot))?;
+
+    let result = client
+        .invoke(&tl::functions::messages::RequestAppWebView {
+            write_allowed: false,
+            compact: false,
+            fullscreen: false,
+            peer: (&bot_ref).into(),
+            app: tl::enums::InputBotApp::ShortName(tl::types::InputBotAppShortName {
+                bot_id: (&bot_ref).into(),
+                short_name: link.short_name.clone(),
+            }),
+            start_param: link.start_param,
+            theme_params: None,
+            platform: "android".to_string(),
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "failed to resolve miniapp url @{}/{}",
+                link.bot, link.short_name
+            )
+        })?;
+
+    match result {
+        tl::enums::WebViewResult::Url(url) => Ok(url.url),
+        // _ => bail!("unexpected webview result for @{}/{}", link.bot, link.short_name),
+    }
 }
 
 async fn wait_for_task_trigger(task: &Task) -> Result<()> {
@@ -166,59 +282,6 @@ async fn wait_for_task_trigger(task: &Task) -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn execute_action(
-    client: &Client,
-    peer: PeerRef,
-    action: &Action,
-    previous_message: Option<&Message>,
-) -> Result<Option<Message>> {
-    let message = match resolve_action(action)? {
-        ResolvedAction::Text(text) => Some(client.send_message(peer, text.text.as_str()).await?),
-        ResolvedAction::Dice(dice) => {
-            let message = InputMessage::new().media(tl::types::InputMediaDice {
-                emoticon: dice.dice.clone(),
-            });
-            Some(client.send_message(peer, message).await?)
-        }
-        ResolvedAction::Click(click) => {
-            click_inline_keyboard(client, peer, &click.key, previous_message).await?
-        }
-        ResolvedAction::Llm(llm) => {
-            execute_llm_action(client, peer, &llm.prompt, previous_message).await?
-        }
-    };
-    Ok(message)
-}
-
-enum ResolvedAction<'a> {
-    Text(&'a crate::config::TextAction),
-    Dice(&'a crate::config::DiceAction),
-    Click(&'a crate::config::ClickAction),
-    Llm(&'a crate::config::LlmAction),
-}
-
-fn resolve_action(action: &Action) -> Result<ResolvedAction<'_>> {
-    let mut selected = Vec::new();
-    if let Some(text) = action.text.as_ref() {
-        selected.push(ResolvedAction::Text(text));
-    }
-    if let Some(dice) = action.dice.as_ref() {
-        selected.push(ResolvedAction::Dice(dice));
-    }
-    if let Some(click) = action.click.as_ref() {
-        selected.push(ResolvedAction::Click(click));
-    }
-    if let Some(llm) = action.llm.as_ref() {
-        selected.push(ResolvedAction::Llm(llm));
-    }
-
-    match selected.len() {
-        1 => Ok(selected.remove(0)),
-        0 => bail!("task action must contain one action body"),
-        _ => bail!("task action must contain only one action body"),
-    }
 }
 
 async fn resolve_task_peer(client: &Client, task: &Task) -> Result<PeerRef> {
@@ -312,16 +375,24 @@ fn trim_username(value: &str) -> &str {
         .trim_start_matches("t.me/")
 }
 
+/// Clicks the inline keyboard button matching `key` (prefix match).
+///
+/// Checks `previous_message` first, then scans the chat's recent messages (retrying while
+/// the bot may still be composing its reply). Returns:
+/// - `Ok(None)` — a callback button was clicked
+/// - `Ok(Some(url))` — a URL button was matched; its target is returned for a following
+///   `browserless` action to consume as `variables.url`
 async fn click_inline_keyboard(
     client: &Client,
     peer: PeerRef,
     key: &str,
     previous_message: Option<&Message>,
-) -> Result<Option<Message>> {
+) -> Result<Option<String>> {
     let mut unsupported_match = None;
 
     enum ClickButtonResult {
         Clicked,
+        Url(String),
         Unsupported(String),
         NotFound,
     }
@@ -336,6 +407,7 @@ async fn click_inline_keyboard(
                     click_inline_callback(client, peer, message_id, data).await?;
                     Ok::<ClickButtonResult, anyhow::Error>(ClickButtonResult::Clicked)
                 }
+                Some(InlineButtonMatch::Url(url)) => Ok(ClickButtonResult::Url(url)),
                 Some(InlineButtonMatch::Unsupported(text)) => {
                     Ok(ClickButtonResult::Unsupported(text))
                 }
@@ -344,19 +416,23 @@ async fn click_inline_keyboard(
         }
     };
 
+    // normal path
     if let Some(message) = previous_message {
         match click_button(message, key).await? {
             ClickButtonResult::Clicked => return Ok(None),
+            ClickButtonResult::Url(url) => return Ok(Some(url)),
             ClickButtonResult::Unsupported(text) => unsupported_match = Some(text),
             ClickButtonResult::NotFound => {}
         }
     }
 
+    // fallback path
     for attempt in 0..CLICK_LOOKUP_ATTEMPTS {
         let mut messages = client.iter_messages(peer).limit(CLICK_LOOKUP_LIMIT);
         while let Some(ref message) = messages.next().await? {
             match click_button(message, key).await? {
                 ClickButtonResult::Clicked => return Ok(None),
+                ClickButtonResult::Url(url) => return Ok(Some(url)),
                 ClickButtonResult::Unsupported(text) => unsupported_match = Some(text),
                 ClickButtonResult::NotFound => {}
             }
@@ -407,6 +483,7 @@ fn callback_answer_text(answer: tl::enums::messages::BotCallbackAnswer) -> Optio
 
 enum InlineButtonMatch {
     Callback(Vec<u8>),
+    Url(String),
     Unsupported(String),
 }
 
@@ -437,13 +514,16 @@ fn find_inline_button_in_rows(
                 for button in &row.buttons {
                     match button {
                         tl::enums::KeyboardInlineButton::Button(button) => {
-                            if button.text != key {
+                            if !button.text.starts_with(key) {
                                 continue;
                             }
 
                             return match &button.r#type {
                                 tl::enums::InlineButtonType::Callback(callback) => {
                                     Some(InlineButtonMatch::Callback(callback.data.clone()))
+                                }
+                                tl::enums::InlineButtonType::Url(InlineButtonTypeUrl { url }) => {
+                                    Some(InlineButtonMatch::Url(url.clone()))
                                 }
                                 _ => Some(InlineButtonMatch::Unsupported(button.text.clone())),
                             };
@@ -471,7 +551,8 @@ async fn execute_llm_action(
             Some(client.send_message(peer, message).await?)
         }
         GeneratedAction::Click(key) => {
-            click_inline_keyboard(client, peer, &key, previous_message).await?
+            let _ = click_inline_keyboard(client, peer, &key, previous_message).await?;
+            None
         }
     };
     Ok(message)
@@ -483,6 +564,7 @@ enum GeneratedAction {
     Click(String),
 }
 
+/// Not test
 async fn request_llm_action(prompt: &str) -> Result<GeneratedAction> {
     let api_key =
         env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required for llm action")?;
@@ -601,14 +683,220 @@ fn parse_llm_action(payload: serde_json::Value) -> Result<GeneratedAction> {
     }
 }
 
+const DEFAULT_BROWSERLESS_URL: &str = "https://production-sfo.browserless.io/stealth/bql";
+
+/// Executes a browserless browser action by POSTing a GraphQL (BQL) request to Browserless.
+///
+/// Request shape (mirrors the documented curl example):
+///   POST <url>?token=<token>&blockConsentModals=true&emulationOs=android&emulatedDevice=pixel-8
+///   Content-Type: application/json
+///   {"query": ..., "variables": ..., "operationName": ...}
+async fn execute_browserless_action(
+    action: &BrowserlessAction,
+    url_from_button: Option<String>,
+) -> Result<()> {
+    debug!("{:?}", url_from_button);
+
+    let url = browserless_request_url(
+        action.url.as_deref().unwrap_or(DEFAULT_BROWSERLESS_URL),
+        &action.token,
+    )?;
+
+    let body = browserless_request_body(action, url_from_button);
+
+    let response = reqwest::Client::new()
+        .post(url)
+        .json(&body)
+        .timeout(Duration::from_mins(3))
+        .send()
+        .await
+        .context("failed to call browserless bql endpoint")?;
+
+    let status = response.status();
+    let payload = response
+        .text()
+        .await
+        .context("failed to read browserless response body")?;
+
+    ensure!(
+        status.is_success(),
+        "browserless bql returned {status}: {payload}"
+    );
+
+    debug!("browserless return {}", payload);
+
+    Ok(())
+}
+
+/// Builds the GraphQL request body: `{"query": ..., "variables": ..., "operationName": ...}`.
+/// `variables.url` is only included when a preceding `click` opened a URL button.
+fn browserless_request_body(
+    action: &BrowserlessAction,
+    url_from_button: Option<String>,
+) -> serde_json::Value {
+    match url_from_button {
+        Some(url) => serde_json::json!({
+            "query": action.query,
+            "variables": { "url": url },
+            "operationName": action.operation_name,
+        }),
+        None => serde_json::json!({
+            "query": action.query,
+            "operationName": action.operation_name,
+        }),
+    }
+}
+
+/// Builds `<base>?token=<token>&blockConsentModals=true&emulationOs=android&emulatedDevice=pixel-8`.
+fn browserless_request_url(base: &str, token: &str) -> Result<String> {
+    let mut url =
+        reqwest::Url::parse(base).with_context(|| format!("invalid browserless url: {base}"))?;
+    url.query_pairs_mut()
+        .append_pair("token", token)
+        .append_pair("blockConsentModals", "true")
+        .append_pair("emulationOs", "android")
+        .append_pair("emulatedDevice", "pixel-8");
+    Ok(url.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use grammers_client::tl;
 
     use super::{
-        GeneratedAction, InlineButtonMatch, callback_answer_text, find_inline_button,
-        parse_llm_action,
+        GeneratedAction, InlineButtonMatch, browserless_request_body, browserless_request_url,
+        callback_answer_text, find_inline_button, parse_llm_action,
     };
+    use crate::config::BrowserlessAction;
+
+    #[test]
+    fn builds_default_browserless_request_url() {
+        let url = browserless_request_url(
+            "https://production-sfo.browserless.io/stealth/bql",
+            "my-token",
+        )
+        .expect("url should build");
+        assert_eq!(
+            url,
+            "https://production-sfo.browserless.io/stealth/bql?token=my-token&blockConsentModals=true&emulationOs=android&emulatedDevice=pixel-8"
+        );
+    }
+
+    #[test]
+    fn encodes_token_in_browserless_request_url() {
+        let url = browserless_request_url(
+            "https://production-sfo.browserless.io/stealth/bql",
+            "tok en&1",
+        )
+        .expect("url should build");
+        assert!(url.contains("token=tok+en%261"), "url was: {url}");
+    }
+
+    #[test]
+    fn builds_browserless_request_body_with_url_from_button() {
+        let action = BrowserlessAction {
+            token: "tok".to_string(),
+            query: "mutation zpr($url: String!) { goto(url: $url) { status } }".to_string(),
+            operation_name: "zpr".to_string(),
+            url: None,
+        };
+
+        let body =
+            browserless_request_body(&action, Some("https://example.com/dashboard".to_string()));
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "query": "mutation zpr($url: String!) { goto(url: $url) { status } }",
+                "variables": { "url": "https://example.com/dashboard" },
+                "operationName": "zpr",
+            })
+        );
+    }
+
+    #[test]
+    fn builds_browserless_request_body_without_url() {
+        let action = BrowserlessAction {
+            token: "tok".to_string(),
+            query: "query { text(selector: \"body\") { text } }".to_string(),
+            operation_name: String::new(),
+            url: None,
+        };
+
+        let body = browserless_request_body(&action, None);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "query": "query { text(selector: \"body\") { text } }",
+                "operationName": "",
+            })
+        );
+        assert!(body.get("variables").is_none());
+    }
+
+    #[tokio::test]
+    async fn posts_browserless_request_to_bql_endpoint() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        use super::execute_browserless_action;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            // read one request
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buffer).to_string();
+                let headers_end = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+                let content_length = text
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("content-length"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .and_then(|v| v.trim().parse::<usize>().ok());
+                if content_length.is_some_and(|len| buffer.len() >= headers_end + len) {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&buffer).to_string();
+            let response =
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
+            socket.write_all(response).await.unwrap();
+            socket.flush().await.unwrap();
+            request
+        });
+
+        let action = BrowserlessAction {
+            token: "my-secret-token".to_string(),
+            query: "mutation zpr($url: String!) { goto(url: $url) { status } }".to_string(),
+            operation_name: "zpr".to_string(),
+            url: Some(format!("http://{addr}/stealth/bql")),
+        };
+
+        execute_browserless_action(&action, Some("https://example.com/dashboard".to_string()))
+            .await
+            .expect("browserless action should succeed");
+
+        let request = server.await.unwrap();
+        let request_line = request.lines().next().unwrap();
+        assert!(
+            request_line.starts_with("POST /stealth/bql?token=my-secret-token&blockConsentModals=true&emulationOs=android&emulatedDevice=pixel-8 HTTP/"),
+            "request line was: {request_line}"
+        );
+        assert!(
+            request.contains("content-type: application/json")
+                || request.contains("Content-Type: application/json")
+        );
+        assert!(request.contains("\"operationName\":\"zpr\""));
+        assert!(request.contains("\"variables\":{\"url\":\"https://example.com/dashboard\"}"));
+    }
 
     #[test]
     fn parses_llm_tool_call_text_action() {
@@ -664,6 +952,37 @@ mod tests {
         match matched {
             Some(InlineButtonMatch::Callback(data)) => assert_eq!(data, b"checkin"),
             _ => panic!("expected inline callback button"),
+        }
+    }
+
+    #[test]
+    fn finds_inline_url_button_by_prefix() {
+        let markup = tl::types::ReplyInlineMarkup {
+            force_reply: false,
+            rows: vec![
+                tl::types::KeyboardInlineButtonRow {
+                    buttons: vec![
+                        tl::types::KeyboardInlineButton {
+                            style: None,
+                            text: "打开网页".to_string(),
+                            r#type: tl::enums::InlineButtonType::Url(
+                                tl::types::InlineButtonTypeUrl {
+                                    url: "https://example.com/dashboard".to_string(),
+                                },
+                            ),
+                        }
+                        .into(),
+                    ],
+                }
+                .into(),
+            ],
+        }
+        .into();
+
+        let matched = find_inline_button(Some(&markup), "打开网页");
+        match matched {
+            Some(InlineButtonMatch::Url(url)) => assert_eq!(url, "https://example.com/dashboard"),
+            _ => panic!("expected inline url button"),
         }
     }
 

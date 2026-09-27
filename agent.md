@@ -19,7 +19,7 @@ Log out and then remove stored data
 
 Tasks are multiple; when this subcommand is called, the CLI should prompt the user for task details and save them to a TOML file. Multiple configurations should prompt the user to continue or not.
 
-Tasks have multiple actions; actions can be `text`, `dice`, `click`, or `llm`. The program runs in the configuration order.
+Tasks have multiple actions; actions can be `text`, `dice`, `click`, `llm`, or `browserless`. The program runs in the configuration order.
 
 ```
 [[task]]
@@ -32,8 +32,40 @@ delay = 30
 action = [
    { text = { text = "" } },
    { dice = { dice = "name str, cli prompt with emoji like: DICE= '🎲' BASKETBALL= '🏀' , DARTS= '🎯'" } },
-   { click = { key = "the key to click" } },
+   { click = { key = "the key to click, prefix match on inline keyboard buttons" } },
    { llm = { prompt = "user custom prompt, and the LLM(openai compatible api) call tool: task_action(action_type, options)" } },
+   { browserless = { token = "browserless token", query = "BQL(GraphQL) query or mutation", operation_name = "optional", url = "optional, defaults to https://production-sfo.browserless.io/stealth/bql" } },
+]
+```
+
+`click` on a URL-type inline button returns the button's URL; a following `browserless` action picks it up as `variables.url`.
+
+#### Browserless
+
+The `browserless` action runs a browser automation script through a [Browserless](https://browserless.io) BQL (GraphQL) endpoint. It configures `token`, `query`, and optionally `operation_name` and `url`.
+
+The program issues the request like:
+
+```
+curl --request POST \
+  --url 'https://production-sfo.browserless.io/stealth/bql?token=${token}&proxy=residential&blockConsentModals=true' \
+  --header 'Content-Type: application/json' \
+  --data '{"query":"...","variables": {"url": "..."},"operationName":"..."}'
+```
+
+`variables.url` is only included when the preceding `click` action opened a URL-type inline button; otherwise the request omits `variables`.
+
+Example:
+
+```
+[[task]]
+name = "web_checkin"
+chat_id = ""
+chat_name = "@some_bot"
+action = [
+   { text = { text = "/checkin" } },
+   { click = { key = "签到" } },
+   { browserless = { token = "TOKEN", query = "mutation zpr($url: String!) { goto(url: $url) { status } }", operation_name = "zpr" } },
 ]
 ```
 
