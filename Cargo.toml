@@ -5,21 +5,21 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
-thiserror = "2"
 chrono = "0.4.44"
 clap = { version = "4.6.7", features = ["derive"] }
 cron = "0.17.0"
 futures = "0.3.34"
 grammers-client = { git = "https://codeberg.org/Lonami/grammers.git", rev = "42d4b51059524cf7c8c9a07745a1071057fa1526" }
-grammers-session = { git = "https://codeberg.org/Lonami/grammers.git", default-features = false, rev = "42d4b51059524cf7c8c9a07745a1071057fa1526" }
+grammers-session = { git = "https://codeberg.org/Lonami/grammers.git", rev = "42d4b51059524cf7c8c9a07745a1071057fa1526", default-features = false }
 inquire = { version = "0.9.4", features = ["editor"] }
 rand = "0.10.1"
+regex-lite = "0.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+thiserror = "2"
 tokio = { version = "1.53.1", features = ["full"] }
 toml = "1.1.6"
-regex-lite = "0.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"

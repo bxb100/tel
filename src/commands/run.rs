@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use std::{env, fs};
 use tokio::time::sleep;
-use tracing::debug;
+use tracing::{debug, error, info};
 
 const CLICK_LOOKUP_LIMIT: usize = 30;
 const CLICK_LOOKUP_ATTEMPTS: usize = 15;
@@ -119,9 +119,9 @@ async fn run_tasks(client: &Client, tasks: Vec<&Task>) -> Result<()> {
 
     for task in tasks {
         if let Err(error) = run_task(client, task).await {
-            eprintln!("task {} failed: {}", task.name, error);
+            error!("task {} failed: {}", task.name, error);
         } else {
-            println!("✔️ Done!");
+            info!("✔️ Done!");
         }
     }
 
@@ -197,7 +197,8 @@ async fn execute_action(
         }
         Action::Click(click) => {
             let previous_message = carry.into_message();
-            match click_inline_keyboard(client, peer, &click.key, previous_message.as_ref()).await? {
+            match click_inline_keyboard(client, peer, &click.key, previous_message.as_ref()).await?
+            {
                 Some(url) => Ok(Carry::Url(url)),
                 None => Ok(Carry::None),
             }
@@ -217,7 +218,7 @@ async fn execute_action(
 async fn apply_delay(task: &Task) {
     if let Some(max_delay) = task.delay.filter(|delay| *delay > 0) {
         let seconds = rand::random_range(1..=u64::from(max_delay));
-        println!("Waiting {seconds}s before action...");
+        info!("Waiting {seconds}s before action...");
         sleep(Duration::from_secs(seconds)).await;
     }
 }
@@ -308,7 +309,7 @@ async fn wait_for_task_trigger(task: &Task) -> Result<()> {
             .to_std()
             .unwrap_or(Duration::ZERO);
         if !wait.is_zero() {
-            println!("Waiting until {next} for cron trigger...");
+            info!("Waiting until {next} for cron trigger...");
             sleep(wait).await;
         }
     }
@@ -500,7 +501,7 @@ async fn click_inline_callback(
         })
         .await?;
     if let Some(text) = callback_answer_text(answer) {
-        println!("{text}");
+        info!("{text}");
     }
     Ok(())
 }
@@ -685,17 +686,29 @@ fn parse_llm_action(payload: serde_json::Value) -> Result<Action> {
         "text" => options
             .get("text")
             .and_then(|value| value.as_str())
-            .map(|text| Action::Text(TextAction { text: text.to_string() }))
+            .map(|text| {
+                Action::Text(TextAction {
+                    text: text.to_string(),
+                })
+            })
             .context("task_action.options.text is required for text action"),
         "dice" => options
             .get("dice")
             .and_then(|value| value.as_str())
-            .map(|dice| Action::Dice(DiceAction { dice: dice.to_string() }))
+            .map(|dice| {
+                Action::Dice(DiceAction {
+                    dice: dice.to_string(),
+                })
+            })
             .context("task_action.options.dice is required for dice action"),
         "click" => options
             .get("key")
             .and_then(|value| value.as_str())
-            .map(|key| Action::Click(ClickAction { key: key.to_string() }))
+            .map(|key| {
+                Action::Click(ClickAction {
+                    key: key.to_string(),
+                })
+            })
             .context("task_action.options.key is required for click action"),
         other => bail!("unsupported llm action_type: {other}"),
     }

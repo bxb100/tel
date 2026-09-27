@@ -2,11 +2,12 @@ use crate::db::{Db, SessionData};
 use crate::telegram::{self, TelegramConnection};
 use grammers_client::SignInError;
 use inquire::{Password, PasswordDisplayMode, Text};
+use tracing::info;
 
 pub async fn execute() -> anyhow::Result<()> {
     let phone = Text::new("Phone number (e.g., +123456789):").prompt()?;
 
-    println!("Connecting to Telegram...");
+    info!("Connecting to Telegram...");
     let session_path = telegram::session_path_for_phone(&phone)?;
     let connection = TelegramConnection::open(&session_path).await?;
     let client = &connection.client;
@@ -27,7 +28,7 @@ pub async fn execute() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    println!("Logged in as {}", signed_in.full_name());
+    info!("Logged in as {}", signed_in.full_name());
 
     let db = Db::new()?;
     let session_data = SessionData {
@@ -37,7 +38,7 @@ pub async fn execute() -> anyhow::Result<()> {
     };
     db.insert_session(&session_data)?;
     connection.shutdown().await;
-    println!("Session stored successfully.");
+    info!("Session stored successfully.");
 
     Ok(())
 }

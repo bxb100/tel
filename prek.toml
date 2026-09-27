@@ -1,0 +1,57 @@
+# Configuration file for `prek`, a git hook framework written in Rust.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+
+fail_fast = true
+default_install_hook_types = ["pre-push"]
+
+[update]
+cooldown_days = 7
+freeze = true
+
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "trailing-whitespace" },
+    { id = "mixed-line-ending" },
+    { id = "check-yaml" },
+    { id = "check-toml" },
+    { id = "end-of-file-fixer" },
+]
+
+[[repos]]
+repo = "https://github.com/executablebooks/mdformat"
+rev = "82912cdaea4fb830f751504486a7879c70526547"  # frozen: 1.0.0
+hooks = [
+    {
+        id = "mdformat",
+        language = "python",
+        args = ["--number", "--compact-tables", "--align-semantic-breaks-in-lists"],
+        additional_dependencies = [
+            "mdformat-frontmatter==2.1.2",
+            "mdformat-mkdocs==5.2.1",
+            "mdformat-simple-breaks==0.1.0",
+        ]
+    }
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+    {
+        id = "cargo-fmt",
+        name = "cargo fmt",
+        entry = "cargo fmt --",
+        language = "system",
+        types = ["rust"],
+        pass_filenames = false,
+    },
+    {
+        id = "cargo-clippy",
+        name = "cargo clippy",
+        language = "system",
+        types = ["rust"],
+        pass_filenames = false,
+        entry = "cargo clippy --all-targets --all-features -- -D warnings",
+    }
+]

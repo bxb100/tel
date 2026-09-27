@@ -1,5 +1,6 @@
 use crate::db::Db;
 use std::path::Path;
+use tracing::info;
 
 pub async fn execute() -> anyhow::Result<()> {
     let db = Db::new()?;
@@ -10,6 +11,6 @@ pub async fn execute() -> anyhow::Result<()> {
         }
     }
     db.remove_all()?;
-    println!("Logged out successfully. All session data removed.");
+    info!("Logged out successfully. All session data removed.");
     Ok(())
 }

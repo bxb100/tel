@@ -4,6 +4,7 @@ use crate::config::{
 };
 use inquire::{Confirm, Editor, Select, Text};
 use std::fs;
+use tracing::info;
 
 pub async fn execute_task() -> anyhow::Result<()> {
     let mut tasks = Vec::new();
@@ -109,7 +110,7 @@ pub async fn execute_task() -> anyhow::Result<()> {
 
     let toml_string = to_inline_toml(&config);
     fs::write("tasks.toml", toml_string)?;
-    println!("Tasks saved to tasks.toml");
+    info!("Tasks saved to tasks.toml");
 
     Ok(())
 }
