@@ -1,2 +1,3 @@
 [env]
 _.file = ".env"
+RUST_LOG = "info,tel=debug"

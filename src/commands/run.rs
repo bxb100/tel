@@ -141,7 +141,9 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
     let mut carry = Carry::None;
     for action in &task.action {
         carry = execute_action(client, peer, action, carry).await?;
-        apply_delay(task).await;
+        if let Some(sleep) = apply_delay(task).await {
+            debug!("Waiting {sleep}s before execute {action:?}")
+        }
     }
 
     Ok(())
@@ -215,11 +217,13 @@ async fn execute_action(
     }
 }
 
-async fn apply_delay(task: &Task) {
+async fn apply_delay(task: &Task) -> Option<u64> {
     if let Some(max_delay) = task.delay.filter(|delay| *delay > 0) {
         let seconds = rand::random_range(1..=u64::from(max_delay));
-        info!("Waiting {seconds}s before action...");
         sleep(Duration::from_secs(seconds)).await;
+        Some(seconds)
+    } else {
+        None
     }
 }
 
@@ -751,7 +755,7 @@ async fn execute_browserless_action(
 
     ensure!(
         status.is_success(),
-        "browserless bql returned {status}: {payload}"
+        "browserless bql returned {status}: {payload:#}"
     );
 
     debug!("browserless return {}", payload);
