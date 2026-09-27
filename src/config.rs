@@ -19,14 +19,18 @@ pub struct Task {
     pub action: Vec<Action>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Action {
-    pub text: Option<TextAction>,
-    pub dice: Option<DiceAction>,
-    pub click: Option<ClickAction>,
-    pub llm: Option<LlmAction>,
-    pub browserless: Option<BrowserlessAction>,
+/// A single task action.
+///
+/// Serialized as an externally tagged TOML inline table, e.g. `{ text = { text = "" } }`.
+/// The enum makes "exactly one action body" a parse-time guarantee instead of a runtime check.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Action {
+    Text(TextAction),
+    Dice(DiceAction),
+    Click(ClickAction),
+    Llm(LlmAction),
+    Browserless(BrowserlessAction),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -72,7 +76,7 @@ pub struct BrowserlessAction {
     pub url: Option<String>,
 }
 
-pub fn to_inline_toml(config: &AppConfig) -> Result<String, String> {
+pub fn to_inline_toml(config: &AppConfig) -> String {
     let mut output = String::new();
 
     for task in &config.task {
@@ -92,13 +96,13 @@ pub fn to_inline_toml(config: &AppConfig) -> Result<String, String> {
         output.push_str("action = [\n");
         for action in &task.action {
             output.push_str("  ");
-            push_inline_action(&mut output, action)?;
+            push_inline_action(&mut output, action);
             output.push_str(",\n");
         }
         output.push_str("]\n\n");
     }
 
-    Ok(output)
+    output
 }
 
 fn push_string_field(output: &mut String, key: &str, value: &str) {
@@ -108,57 +112,42 @@ fn push_string_field(output: &mut String, key: &str, value: &str) {
     output.push('\n');
 }
 
-fn push_inline_action(output: &mut String, action: &Action) -> Result<(), String> {
-    let mut action_count = 0;
-
-    if let Some(text) = action.text.as_ref() {
-        action_count += 1;
-        output.push_str("{ text = { text = ");
-        output.push_str(&toml_string(&text.text));
-        output.push_str(" } }");
-    }
-
-    if let Some(dice) = action.dice.as_ref() {
-        action_count += 1;
-        output.push_str("{ dice = { dice = ");
-        output.push_str(&toml_string(&dice.dice));
-        output.push_str(" } }");
-    }
-
-    if let Some(click) = action.click.as_ref() {
-        action_count += 1;
-        output.push_str("{ click = { key = ");
-        output.push_str(&toml_string(&click.key));
-        output.push_str(" } }");
-    }
-
-    if let Some(llm) = action.llm.as_ref() {
-        action_count += 1;
-        output.push_str("{ llm = { prompt = ");
-        output.push_str(&toml_string(&llm.prompt));
-        output.push_str(" } }");
-    }
-
-    if let Some(browserless) = action.browserless.as_ref() {
-        action_count += 1;
-        output.push_str("{ browserless = { token = ");
-        output.push_str(&toml_string(&browserless.token));
-        output.push_str(", query = ");
-        output.push_str(&toml_string(&browserless.query));
-        output.push_str(", operation_name = ");
-        output.push_str(&toml_string(browserless.operation_name.as_ref()));
-
-        if let Some(url) = browserless.url.as_ref() {
-            output.push_str(", url = ");
-            output.push_str(&toml_string(url));
+fn push_inline_action(output: &mut String, action: &Action) {
+    match action {
+        Action::Text(text) => {
+            output.push_str("{ text = { text = ");
+            output.push_str(&toml_string(&text.text));
+            output.push_str(" } }");
         }
-        output.push_str(" } }");
-    }
+        Action::Dice(dice) => {
+            output.push_str("{ dice = { dice = ");
+            output.push_str(&toml_string(&dice.dice));
+            output.push_str(" } }");
+        }
+        Action::Click(click) => {
+            output.push_str("{ click = { key = ");
+            output.push_str(&toml_string(&click.key));
+            output.push_str(" } }");
+        }
+        Action::Llm(llm) => {
+            output.push_str("{ llm = { prompt = ");
+            output.push_str(&toml_string(&llm.prompt));
+            output.push_str(" } }");
+        }
+        Action::Browserless(browserless) => {
+            output.push_str("{ browserless = { token = ");
+            output.push_str(&toml_string(&browserless.token));
+            output.push_str(", query = ");
+            output.push_str(&toml_string(&browserless.query));
+            output.push_str(", operation_name = ");
+            output.push_str(&toml_string(browserless.operation_name.as_ref()));
 
-    match action_count {
-        1 => Ok(()),
-        0 => Err("task action must contain one action body".to_string()),
-        _ => Err("task action must contain only one action body".to_string()),
+            if let Some(url) = browserless.url.as_ref() {
+                output.push_str(", url = ");
+                output.push_str(&toml_string(url));
+            }
+            output.push_str(" } }");
+        }
     }
 }
 
@@ -186,7 +175,7 @@ fn toml_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, to_inline_toml};
+    use super::{Action, AppConfig, to_inline_toml};
 
     #[test]
     fn parses_inline_actions_with_task_schedule() {
@@ -212,7 +201,7 @@ mod tests {
         assert_eq!(task.cron.as_deref(), Some("0 0 9 * * *"));
         assert_eq!(task.delay, Some(30));
         assert_eq!(task.action.len(), 4);
-        assert_eq!(task.action[0].text.as_ref().unwrap().text, "/start");
+        assert!(matches!(&task.action[0], Action::Text(text) if text.text == "/start"));
     }
 
     #[test]
@@ -229,7 +218,7 @@ mod tests {
         )
         .expect("inline task config should parse");
 
-        let output = to_inline_toml(&config).expect("config should serialize");
+        let output = to_inline_toml(&config);
         assert!(output.contains("action = [\n  { text = { text = \"hello\" } },\n]"));
         assert!(!output.contains("[[task.action]]"));
     }
@@ -248,17 +237,21 @@ mod tests {
         )
         .expect("browserless task config should parse");
 
-        let action = config.task[0].action[0].browserless.as_ref().unwrap();
+        let Action::Browserless(action) = &config.task[0].action[0] else {
+            panic!("expected a browserless action");
+        };
         assert_eq!(action.token, "tok");
         assert_eq!(action.operation_name, "zpr");
         assert_eq!(action.url, None);
 
-        let output = to_inline_toml(&config).expect("browserless config should serialize");
+        let output = to_inline_toml(&config);
         assert!(output.contains("browserless = { token = \"tok\""));
         assert!(output.contains("operation_name = \"zpr\""));
 
         let reparsed = toml::from_str::<AppConfig>(&output).expect("roundtrip should parse");
-        let action = reparsed.task[0].action[0].browserless.as_ref().unwrap();
+        let Action::Browserless(action) = &reparsed.task[0].action[0] else {
+            panic!("expected a browserless action");
+        };
         assert_eq!(action.token, "tok");
         assert_eq!(action.operation_name, "zpr");
     }

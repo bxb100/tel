@@ -1,4 +1,6 @@
-use crate::config::{AppConfig, BrowserlessAction, Task};
+use crate::config::{
+    Action, AppConfig, BrowserlessAction, ClickAction, DiceAction, Task, TextAction,
+};
 use crate::db::{Db, SessionData};
 use crate::telegram::TelegramConnection;
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -136,58 +138,88 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
     let peer = resolve_task_peer(client, task).await?;
     wait_for_task_trigger(task).await?;
 
-    // State threaded between actions:
-    // - the last sent message, so `click` can look for buttons on it
-    // - the last URL opened via an inline URL button, consumed by `browserless` as variables.url
-    let mut previous_message = None;
-    let mut last_url = None;
-
+    let mut carry = Carry::None;
     for action in &task.action {
-        let bodies = action.text.is_some() as usize
-            + action.dice.is_some() as usize
-            + action.click.is_some() as usize
-            + action.llm.is_some() as usize
-            + action.browserless.is_some() as usize;
-        match bodies {
-            0 => bail!("task action must contain one action body"),
-            1 => {}
-            _ => bail!("task action must contain only one action body"),
-        }
+        carry = execute_action(client, peer, action, carry).await?;
+        apply_delay(task).await;
+    }
 
-        if let Some(text) = &action.text {
-            previous_message = Some(client.send_message(peer, text.text.as_str()).await?);
-            last_url = None;
-        } else if let Some(dice) = &action.dice {
+    Ok(())
+}
+
+/// Value threaded from one action to the next. The two hand-offs are mutually
+/// exclusive, so a single enum makes "a message and a URL at once" unrepresentable.
+enum Carry {
+    /// Nothing to hand to the next action.
+    None,
+    /// The last message we sent; `click` searches it for inline buttons.
+    /// Boxed because `Message` is large relative to the other variants.
+    Message(Box<Message>),
+    /// A URL opened by a `click` on a URL button; `browserless` consumes it as `variables.url`.
+    Url(String),
+}
+
+impl Carry {
+    /// The carried message, if the previous action left one (for `click`).
+    fn into_message(self) -> Option<Message> {
+        match self {
+            Carry::Message(message) => Some(*message),
+            _ => None,
+        }
+    }
+
+    /// The carried URL, if the previous action left one (for `browserless`).
+    fn into_url(self) -> Option<String> {
+        match self {
+            Carry::Url(url) => Some(url),
+            _ => None,
+        }
+    }
+}
+
+async fn execute_action(
+    client: &Client,
+    peer: PeerRef,
+    action: &Action,
+    carry: Carry,
+) -> Result<Carry> {
+    match action {
+        Action::Text(text) => Ok(Carry::Message(Box::new(
+            client.send_message(peer, text.text.as_str()).await?,
+        ))),
+        Action::Dice(dice) => {
             let message = InputMessage::new().media(tl::types::InputMediaDice {
                 emoticon: dice.dice.clone(),
             });
-            previous_message = Some(client.send_message(peer, message).await?);
-            last_url = None;
-        } else if let Some(click) = &action.click {
-            last_url =
-                click_inline_keyboard(client, peer, &click.key, previous_message.as_ref()).await?;
-            previous_message = None;
-        } else if let Some(llm) = &action.llm {
-            previous_message =
-                execute_llm_action(client, peer, &llm.prompt, previous_message.as_ref()).await?;
-            last_url = None;
-        } else if let Some(browserless) = &action.browserless {
-            let url = match last_url.take() {
+            Ok(Carry::Message(Box::new(
+                client.send_message(peer, message).await?,
+            )))
+        }
+        Action::Click(click) => {
+            let previous_message = carry.into_message();
+            match click_inline_keyboard(client, peer, &click.key, previous_message.as_ref()).await? {
+                Some(url) => Ok(Carry::Url(url)),
+                None => Ok(Carry::None),
+            }
+        }
+        Action::Llm(llm) => execute_llm_action(client, peer, &llm.prompt, carry).await,
+        Action::Browserless(browserless) => {
+            let url = match carry.into_url() {
                 Some(url) => Some(resolve_url_if_miniapp(client, &url).await?),
                 None => None,
             };
             execute_browserless_action(browserless, url).await?;
-            previous_message = None;
-        }
-
-        if let Some(max_delay) = task.delay.filter(|delay| *delay > 0) {
-            let seconds = rand::random_range(1..=u64::from(max_delay));
-            println!("Waiting {seconds}s before action...");
-            sleep(Duration::from_secs(seconds)).await;
+            Ok(Carry::None)
         }
     }
+}
 
-    Ok(())
+async fn apply_delay(task: &Task) {
+    if let Some(max_delay) = task.delay.filter(|delay| *delay > 0) {
+        let seconds = rand::random_range(1..=u64::from(max_delay));
+        println!("Waiting {seconds}s before action...");
+        sleep(Duration::from_secs(seconds)).await;
+    }
 }
 
 struct MiniappLink {
@@ -537,35 +569,21 @@ fn find_inline_button_in_rows(
     None
 }
 
+/// Asks the LLM to choose the next action, then runs it through the same executor
+/// as configured actions so state hand-off (e.g. `click` reading the previous
+/// message) behaves identically.
 async fn execute_llm_action(
     client: &Client,
     peer: PeerRef,
     prompt: &str,
-    previous_message: Option<&Message>,
-) -> Result<Option<Message>> {
+    carry: Carry,
+) -> Result<Carry> {
     let action = request_llm_action(prompt).await?;
-    let message = match action {
-        GeneratedAction::Text(text) => Some(client.send_message(peer, text).await?),
-        GeneratedAction::Dice(dice) => {
-            let message = InputMessage::new().media(tl::types::InputMediaDice { emoticon: dice });
-            Some(client.send_message(peer, message).await?)
-        }
-        GeneratedAction::Click(key) => {
-            let _ = click_inline_keyboard(client, peer, &key, previous_message).await?;
-            None
-        }
-    };
-    Ok(message)
-}
-
-enum GeneratedAction {
-    Text(String),
-    Dice(String),
-    Click(String),
+    Box::pin(execute_action(client, peer, &action, carry)).await
 }
 
 /// Not test
-async fn request_llm_action(prompt: &str) -> Result<GeneratedAction> {
+async fn request_llm_action(prompt: &str) -> Result<Action> {
     let api_key =
         env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required for llm action")?;
     let model = env::var("OPENAI_MODEL").context("OPENAI_MODEL is required for llm action")?;
@@ -647,7 +665,7 @@ async fn request_llm_action(prompt: &str) -> Result<GeneratedAction> {
     parse_llm_action(payload)
 }
 
-fn parse_llm_action(payload: serde_json::Value) -> Result<GeneratedAction> {
+fn parse_llm_action(payload: serde_json::Value) -> Result<Action> {
     let arguments = payload
         .pointer("/choices/0/message/tool_calls/0/function/arguments")
         .and_then(|value| value.as_str())
@@ -667,17 +685,17 @@ fn parse_llm_action(payload: serde_json::Value) -> Result<GeneratedAction> {
         "text" => options
             .get("text")
             .and_then(|value| value.as_str())
-            .map(|text| GeneratedAction::Text(text.to_string()))
+            .map(|text| Action::Text(TextAction { text: text.to_string() }))
             .context("task_action.options.text is required for text action"),
         "dice" => options
             .get("dice")
             .and_then(|value| value.as_str())
-            .map(|dice| GeneratedAction::Dice(dice.to_string()))
+            .map(|dice| Action::Dice(DiceAction { dice: dice.to_string() }))
             .context("task_action.options.dice is required for dice action"),
         "click" => options
             .get("key")
             .and_then(|value| value.as_str())
-            .map(|key| GeneratedAction::Click(key.to_string()))
+            .map(|key| Action::Click(ClickAction { key: key.to_string() }))
             .context("task_action.options.key is required for click action"),
         other => bail!("unsupported llm action_type: {other}"),
     }
@@ -764,10 +782,10 @@ mod tests {
     use grammers_client::tl;
 
     use super::{
-        GeneratedAction, InlineButtonMatch, browserless_request_body, browserless_request_url,
-        callback_answer_text, find_inline_button, parse_llm_action,
+        InlineButtonMatch, browserless_request_body, browserless_request_url, callback_answer_text,
+        find_inline_button, parse_llm_action,
     };
-    use crate::config::BrowserlessAction;
+    use crate::config::{Action, BrowserlessAction};
 
     #[test]
     fn builds_default_browserless_request_url() {
@@ -918,7 +936,7 @@ mod tests {
 
         let action = parse_llm_action(payload).expect("tool call should parse");
         match action {
-            GeneratedAction::Text(text) => assert_eq!(text, "hello"),
+            Action::Text(text) => assert_eq!(text.text, "hello"),
             _ => panic!("expected text action"),
         }
     }
