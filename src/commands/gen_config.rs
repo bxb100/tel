@@ -4,6 +4,7 @@ use crate::config::{
 };
 use inquire::{Confirm, Editor, Select, Text};
 use std::fs;
+use tracing::info;
 
 pub async fn execute_task() -> anyhow::Result<()> {
     let mut tasks = Vec::new();
@@ -29,27 +30,25 @@ pub async fn execute_task() -> anyhow::Result<()> {
             )
             .prompt()?;
 
-            let mut action = Action::default();
-
-            match action_type {
+            let action = match action_type {
                 "text" => {
                     let text = Text::new("Text to send:").prompt()?;
-                    action.text = Some(TextAction { text });
+                    Action::Text(TextAction { text })
                 }
                 "dice" => {
                     let dice = Select::new("Dice type:", vec!["🎲", "🏀", "🎯", "⚽", "🎳", "🎰"])
                         .prompt()?;
-                    action.dice = Some(DiceAction {
+                    Action::Dice(DiceAction {
                         dice: dice.to_string(),
-                    });
+                    })
                 }
                 "click" => {
                     let key = Text::new("Key to click:").prompt()?;
-                    action.click = Some(ClickAction { key });
+                    Action::Click(ClickAction { key })
                 }
                 "llm" => {
                     let prompt = Text::new("LLM Prompt:").prompt()?;
-                    action.llm = Some(LlmAction { prompt });
+                    Action::Llm(LlmAction { prompt })
                 }
                 "browserless" => {
                     let token = Text::new("Browserless token:").prompt()?;
@@ -63,17 +62,15 @@ pub async fn execute_task() -> anyhow::Result<()> {
                         .with_placeholder("https://production-sfo.browserless.io/stealth/bql")
                         .prompt_skippable()?;
 
-                    let browserless = BrowserlessAction {
+                    Action::Browserless(BrowserlessAction {
                         token,
                         query,
                         operation_name,
                         url,
-                    };
-
-                    action.browserless = Some(browserless);
+                    })
                 }
                 _ => unreachable!(),
-            }
+            };
 
             actions.push(action);
 
@@ -91,7 +88,7 @@ pub async fn execute_task() -> anyhow::Result<()> {
             chat_name,
             cron,
             delay,
-            action: actions,
+            actions,
         });
 
         let add_more_task = Confirm::new("Add another task?")
@@ -111,9 +108,9 @@ pub async fn execute_task() -> anyhow::Result<()> {
 
     config.task.extend(tasks);
 
-    let toml_string = to_inline_toml(&config).map_err(anyhow::Error::msg)?;
+    let toml_string = to_inline_toml(&config);
     fs::write("tasks.toml", toml_string)?;
-    println!("Tasks saved to tasks.toml");
+    info!("Tasks saved to tasks.toml");
 
     Ok(())
 }

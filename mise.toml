@@ -1,2 +1,10 @@
 [env]
-_.file = ".env"
+_ = { file = ".env" }
+RUST_LOG = "info,tel=debug"
+
+[tasks.push]
+description = "Upload file to r2 by rclone"
+usage = '''
+arg "<file>" help="File path"
+'''
+run = "rclone copyto ${usage_file} r2:action/${usage_file} -cuP"
