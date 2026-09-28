@@ -88,7 +88,7 @@ pub async fn execute_task() -> anyhow::Result<()> {
             chat_name,
             cron,
             delay,
-            action: actions,
+            actions,
         });
 
         let add_more_task = Confirm::new("Add another task?")

@@ -16,7 +16,7 @@ pub struct Task {
     pub cron: Option<String>,
     pub delay: Option<u32>,
     #[serde(default)]
-    pub action: Vec<Action>,
+    pub actions: Vec<Action>,
 }
 
 /// A single task action.
@@ -93,8 +93,8 @@ pub fn to_inline_toml(config: &AppConfig) -> String {
             output.push_str(&format!("delay = {delay}\n"));
         }
 
-        output.push_str("action = [\n");
-        for action in &task.action {
+        output.push_str("actions = [\n");
+        for action in &task.actions {
             output.push_str("  ");
             push_inline_action(&mut output, action);
             output.push_str(",\n");
@@ -187,7 +187,7 @@ mod tests {
             chat_name = "@example"
             cron = "0 0 9 * * *"
             delay = 30
-            action = [
+            actions = [
               { text = { text = "/start" } },
               { dice = { dice = "🎲" } },
               { click = { key = "OK" } },
@@ -200,8 +200,8 @@ mod tests {
         let task = &config.task[0];
         assert_eq!(task.cron.as_deref(), Some("0 0 9 * * *"));
         assert_eq!(task.delay, Some(30));
-        assert_eq!(task.action.len(), 4);
-        assert!(matches!(&task.action[0], Action::Text(text) if text.text == "/start"));
+        assert_eq!(task.actions.len(), 4);
+        assert!(matches!(&task.actions[0], Action::Text(text) if text.text == "/start"));
     }
 
     #[test]
@@ -211,7 +211,7 @@ mod tests {
             [[task]]
             name = "task_name"
             chat_id = "123"
-            action = [
+            actions = [
               { text = { text = "hello" } },
             ]
             "#,
@@ -219,8 +219,8 @@ mod tests {
         .expect("inline task config should parse");
 
         let output = to_inline_toml(&config);
-        assert!(output.contains("action = [\n  { text = { text = \"hello\" } },\n]"));
-        assert!(!output.contains("[[task.action]]"));
+        assert!(output.contains("actions = [\n  { text = { text = \"hello\" } },\n]"));
+        assert!(!output.contains("[[task.actions]]"));
     }
 
     #[test]
@@ -230,14 +230,14 @@ mod tests {
             [[task]]
             name = "task_name"
             chat_id = "123"
-            action = [
+            actions = [
               { browserless = { token = "tok", query = "mutation zpr($url: String!) { goto(url: $url) { status } }", operation_name = "zpr" } },
             ]
             "#,
         )
         .expect("browserless task config should parse");
 
-        let Action::Browserless(action) = &config.task[0].action[0] else {
+        let Action::Browserless(action) = &config.task[0].actions[0] else {
             panic!("expected a browserless action");
         };
         assert_eq!(action.token, "tok");
@@ -249,7 +249,7 @@ mod tests {
         assert!(output.contains("operation_name = \"zpr\""));
 
         let reparsed = toml::from_str::<AppConfig>(&output).expect("roundtrip should parse");
-        let Action::Browserless(action) = &reparsed.task[0].action[0] else {
+        let Action::Browserless(action) = &reparsed.task[0].actions[0] else {
             panic!("expected a browserless action");
         };
         assert_eq!(action.token, "tok");

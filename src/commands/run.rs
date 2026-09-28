@@ -130,7 +130,7 @@ async fn run_tasks(client: &Client, tasks: Vec<&Task>) -> Result<()> {
 
 async fn run_task(client: &Client, task: &Task) -> Result<()> {
     ensure!(
-        !task.action.is_empty(),
+        !task.actions.is_empty(),
         "task {} has no action entries",
         task.name
     );
@@ -139,7 +139,7 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
     wait_for_task_trigger(task).await?;
 
     let mut carry = Carry::None;
-    for action in &task.action {
+    for action in &task.actions {
         carry = execute_action(client, peer, action, carry).await?;
         if let Some(sleep) = apply_delay(task).await {
             debug!("Waiting {sleep}s before execute {action:?}")

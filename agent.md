@@ -29,7 +29,7 @@ chat_name = "optional, fallback to `resolveUsername` when `get_dialogs` missing 
 cron = "optional, trigger by cron expression"
 delay = 30
 
-action = [
+actions = [
    { text = { text = "" } },
    { dice = { dice = "name str, cli prompt with emoji like: DICE= '🎲' BASKETBALL= '🏀' , DARTS= '🎯'" } },
    { click = { key = "the key to click, prefix match on inline keyboard buttons" } },
@@ -62,7 +62,7 @@ Example:
 name = "web_checkin"
 chat_id = ""
 chat_name = "@some_bot"
-action = [
+actions = [
    { text = { text = "/checkin" } },
    { click = { key = "签到" } },
    { browserless = { token = "TOKEN", query = "mutation zpr($url: String!) { goto(url: $url) { status } }", operation_name = "zpr" } },
