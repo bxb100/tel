@@ -9,7 +9,7 @@ chrono = "0.4.44"
 clap = { version = "4.6.7", features = ["derive"] }
 cron = "0.17.0"
 futures = "0.3.34"
-grammers-client = { git = "https://codeberg.org/Lonami/grammers.git", rev = "42d4b51059524cf7c8c9a07745a1071057fa1526" }
+grammers-client = { git = "https://codeberg.org/Lonami/grammers.git", rev = "e7730ae3e00a5427b9d90f06ee6d2e985b63f8c1" }
 grammers-session = { git = "https://codeberg.org/Lonami/grammers.git", rev = "42d4b51059524cf7c8c9a07745a1071057fa1526", default-features = false }
 inquire = { version = "0.9.4", features = ["editor"] }
 rand = "0.10.1"
