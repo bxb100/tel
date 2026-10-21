@@ -1,6 +1,6 @@
 use crate::config::{
-    Action, AppConfig, BrowserlessAction, ClickAction, DiceAction, LlmAction, Task, TextAction,
-    to_inline_toml,
+    Action, ActionEntry, AppConfig, BrowserlessAction, ClickAction, DiceAction, LlmAction, Task,
+    TextAction, to_inline_toml,
 };
 use inquire::{Confirm, Editor, Select, Text};
 use std::fs;
@@ -22,7 +22,7 @@ pub async fn execute_task() -> anyhow::Result<()> {
             None => None,
         };
 
-        let mut actions = Vec::new();
+        let mut actions: Vec<ActionEntry> = Vec::new();
         loop {
             let action_type = Select::new(
                 "Action type:",
@@ -67,12 +67,15 @@ pub async fn execute_task() -> anyhow::Result<()> {
                         query,
                         operation_name,
                         url,
+                        variables: Default::default(),
                     })
                 }
                 _ => unreachable!(),
             };
 
-            actions.push(action);
+            let id = optional_input(Text::new("Action id (optional):").prompt()?);
+            let mapper = prompt_mapper()?;
+            actions.push(ActionEntry { id, mapper, action });
 
             let add_more = Confirm::new("Add another action to this task?")
                 .with_default(false)
@@ -113,6 +116,24 @@ pub async fn execute_task() -> anyhow::Result<()> {
     info!("Tasks saved to tasks.toml");
 
     Ok(())
+}
+
+/// Prompts for mapper entries (`key = "json_path"`, both optional) until the
+/// user stops adding them.
+fn prompt_mapper() -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut mapper = std::collections::BTreeMap::new();
+    loop {
+        let add = Confirm::new("Add a mapper entry (key -> json_path)?")
+            .with_default(false)
+            .prompt()?;
+        if !add {
+            break;
+        }
+        let key = Text::new("Mapper key:").prompt()?;
+        let path = Text::new("JSON path (relative to the action output `data`):").prompt()?;
+        mapper.insert(key, path);
+    }
+    Ok(mapper)
 }
 
 fn optional_input(value: String) -> Option<String> {

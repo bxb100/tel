@@ -72,6 +72,5 @@ pub(super) async fn resolve_url_if_miniapp(client: &Client, url: &str) -> Result
 
     match result {
         tl::enums::WebViewResult::Url(url) => Ok(url.url),
-        // _ => bail!("unexpected webview result for @{}/{}", link.bot, link.short_name),
     }
 }

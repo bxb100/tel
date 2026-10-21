@@ -4,7 +4,7 @@ use grammers_client::Client;
 use grammers_client::session::types::PeerRef;
 use std::env;
 
-use super::{Carry, execute_action};
+use super::{OutputValue, TaskContext, execute_action};
 
 /// Asks the LLM to choose the next action, then runs it through the same executor
 /// as configured actions so state hand-off (e.g. `click` reading the previous
@@ -13,13 +13,12 @@ pub(super) async fn execute_llm_action(
     client: &Client,
     peer: PeerRef,
     prompt: &str,
-    carry: Carry,
-) -> Result<Carry> {
+    context: &mut TaskContext,
+) -> Result<OutputValue> {
     let action = request_llm_action(prompt).await?;
-    Box::pin(execute_action(client, peer, &action, carry)).await
+    Box::pin(execute_action(client, peer, &action, context)).await
 }
 
-/// Not test
 async fn request_llm_action(prompt: &str) -> Result<Action> {
     let api_key =
         env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required for llm action")?;
