@@ -1,0 +1,48 @@
+# Example task configuration demonstrating action ids, entry-level mappers, and
+# `ctx.<id>.<key>` templates.
+#
+# Every action stores its result in a uniform map `{ data = <value> }`; the
+# entry-level `mapper` extracts extra keys from `data` (any action type).
+# Browserless sessions are explicit: a query requests `reconnect`, a mapper
+# stores the endpoint, and a later action reuses it with `url = "{{ ctx.<id>.<key> }}"`.
+
+[[task]]
+name = "example_with_ctx"
+chat_id = "123456789"
+chat_name = "@example_bot"
+actions = [
+    # Step 1: send a command. Output map: { data = "/start" }.
+    { id = "send_cmd", text = { text = "/start" } },
+
+    # Step 2: click a URL button. Output map: { data = "<button url>" }.
+    { id = "open", click = { key = "📱" } },
+
+    # Step 3: open the clicked url, passed explicitly as the `$url` query
+    # variable. `reconnect` returns a session endpoint and the mapper stores it
+    # as `url`. Output map:
+    # { data = { goto = { status = 200 }, reconnect = { ... } }, url = "<endpoint>" }.
+    { id = "login_page", mapper = { url = "data.reconnect.browserQLEndpoint" }, browserless = { token = "451cc875-ce40-4835-b49f-d64d4a9dc7ce", variables = { url = "{{ ctx.open.data }}" }, query = "mutation Go($url: String!) {\n  goto(url: $url, waitUntil: networkIdle) {\n    status\n  }\n  reconnect(timeout: 30000) {\n    browserQLEndpoint\n  }\n}", operation_name = "Go" } },
+
+    # Step 4: scrape the verification code in the same browser by reusing the
+    # endpoint through a template in `url`; the entry mapper extracts the code
+    # from data into `code`: { data = { text = { text = "123456" } }, code = "123456" }.
+    { id = "scrape", mapper = { code = "data.text.text" }, browserless = { token = "451cc875-ce40-4835-b49f-d64d4a9dc7ce", url = "{{ ctx.login_page.url }}", query = "mutation Scrape {\n  text(selector: \".verify-code\") {\n    text\n  }\n}", operation_name = "Scrape" } },
+
+    # Step 5: reference values by id and key — mapper key, data, or a JSON
+    # path through data. All forms below resolve to the scraped code:
+    { text = { text = "验证码是 {{ctx.scrape.code}}" } },
+    { text = { text = "验证码是 {{ctx.scrape.data.text.text}}" } },
+    { text = { text = "验证码是 {{ctx.3.code}}" } },
+    # Numbers render directly:
+    { text = { text = "登录页状态: {{ctx.login_page.data.goto.status}}" } },
+]
+
+[[task]]
+name = "mapper_on_any_action"
+chat_id = "987654321"
+chat_name = "@another_bot"
+actions = [
+    # mapper works on any action: rename the sent text to `msg`.
+    { id = "hello", mapper = { msg = "data" }, text = { text = "hello" } },
+    { text = { text = "刚才发送了: {{ctx.hello.msg}}" } },
+]
