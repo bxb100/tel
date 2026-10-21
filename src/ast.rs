@@ -10,8 +10,6 @@ use std::fmt;
 use std::iter::Peekable;
 use std::str::Chars;
 
-// ───────────── AST ─────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Seg {
     Key(String),  // .name
@@ -51,8 +49,6 @@ fn fmt_path(segs: &[Seg]) -> impl fmt::Display + '_ {
     Path(segs)
 }
 
-// ───────────── 解析：模板 → Vec<Part> ─────────────
-
 pub fn parse_template(src: &str) -> Result<Template<'_>> {
     let mut parts = Vec::new();
     let mut rest = src;
@@ -73,8 +69,6 @@ pub fn parse_template(src: &str) -> Result<Template<'_>> {
     }
     Ok(parts)
 }
-
-// ───────────── 解析：`{{ }}` 内部 → Expr ─────────────
 
 struct Parser<'a> {
     chars: Peekable<Chars<'a>>,
@@ -98,7 +92,6 @@ impl Parser<'_> {
         while self.chars.next_if(|c| c.is_whitespace()).is_some() {}
     }
 
-    /// 取出满足 `pred` 的连续字符。
     fn take_while(&mut self, pred: impl Fn(char) -> bool) -> String {
         let mut taken = String::new();
         while let Some(c) = self.chars.next_if(|c| pred(*c)) {
@@ -107,7 +100,6 @@ impl Parser<'_> {
         taken
     }
 
-    // 以后加运算符就在这一层做优先级处理: expr -> or -> and -> eq -> unary -> primary
     fn expr(&mut self) -> Result<Expr> {
         self.path()
     }
@@ -149,8 +141,6 @@ impl Parser<'_> {
     }
 }
 
-// ───────────── 求值：Expr + ctx → &Value ─────────────
-
 /// 沿路径在 `ctx` 里取值，借用结果而不拷贝。
 pub fn eval<'a>(expr: &Expr, ctx: &'a Value) -> Result<&'a Value> {
     let Expr::Path(segs) = expr;
@@ -177,8 +167,6 @@ pub fn eval<'a>(expr: &Expr, ctx: &'a Value) -> Result<&'a Value> {
     Ok(cur)
 }
 
-// ───────────── 渲染 ─────────────
-
 /// 值嵌入文本时的写法：字符串原样，null 为空，其余为 JSON。
 fn stringify(value: &Value) -> Cow<'_, str> {
     match value {
@@ -189,7 +177,6 @@ fn stringify(value: &Value) -> Cow<'_, str> {
 }
 
 pub fn render(tpl: &Template, ctx: &Value) -> Result<Value> {
-    // 整串只有一个表达式时保留原类型（数字还是数字）
     if let [Part::Expr(expr)] = tpl.as_slice() {
         return eval(expr, ctx).cloned();
     }
@@ -209,7 +196,6 @@ pub fn stringify_terminal(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         Value::Null => String::new(),
-        // `{"text": "123456"}` 这类单字段对象解包成它的标量。
         Value::Object(map) if map.len() == 1 => match map.values().next() {
             Some(inner) if !inner.is_object() && !inner.is_array() => stringify_terminal(inner),
             _ => value.to_string(),
@@ -322,7 +308,6 @@ mod tests {
         assert_eq!(render_string("{{s}}", &ctx).unwrap(), "x");
         assert_eq!(render_string("{{n}}", &ctx).unwrap(), "7");
         assert_eq!(render_string("{{z}}", &ctx).unwrap(), "");
-        // 单字段对象解包成标量，多字段对象按 JSON 写法。
         assert_eq!(render_string("{{o}}", &ctx).unwrap(), "1");
         assert_eq!(
             render_string("{{m}}", &json!({ "m": { "a": 1, "b": 2 } })).unwrap(),

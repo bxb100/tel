@@ -22,11 +22,8 @@ pub(super) enum ClickOutcome {
 
 /// Clicks the inline keyboard button matching `key` (prefix match).
 ///
-/// Checks `previous_message` first, then scans the chat's recent messages (retrying while
-/// the bot may still be composing its reply). Returns:
-/// - `Answer` — a callback button was clicked (carries the bot's reply)
-/// - `Url` — a URL button was matched; its target is the action's output `data`,
-///   which a later action can reference as `{{ ctx.<id>.data }}`
+/// Checks `previous_message` first, then scans the chat's recent messages,
+/// retrying while the bot may still be composing its reply.
 pub(super) async fn click_inline_keyboard(
     client: &Client,
     peer: PeerRef,
@@ -61,7 +58,6 @@ pub(super) async fn click_inline_keyboard(
         }
     };
 
-    // normal path
     if let Some(message) = previous_message {
         match click_button(message, key).await? {
             ClickButtonResult::Clicked(answer_text) => {
@@ -73,7 +69,6 @@ pub(super) async fn click_inline_keyboard(
         }
     }
 
-    // fallback path
     for attempt in 0..CLICK_LOOKUP_ATTEMPTS {
         let mut messages = client.iter_messages(peer).limit(CLICK_LOOKUP_LIMIT);
         while let Some(ref message) = messages.next().await? {

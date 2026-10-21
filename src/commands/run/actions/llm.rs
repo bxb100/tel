@@ -19,7 +19,6 @@ pub(super) async fn execute_llm_action(
     Box::pin(execute_action(client, peer, &action, context)).await
 }
 
-/// Not test
 async fn request_llm_action(prompt: &str) -> Result<Action> {
     let api_key =
         env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required for llm action")?;

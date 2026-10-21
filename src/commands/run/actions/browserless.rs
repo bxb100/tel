@@ -9,17 +9,11 @@ use tracing::debug;
 const DEFAULT_URL: &str = "https://production-sfo.browserless.io/stealth/bql";
 
 /// Executes a browserless BQL query against `action.url` (default endpoint
-/// when unset).
+/// when unset) and returns the BQL response `data` object as the output.
 ///
-/// Sessions are explicit: to keep using one browser, the query requests a
-/// `reconnect` field, a `mapper` stores its `browserQLEndpoint` under a key,
-/// and the next action sets `url = "{{ ctx.<id>.<key> }}"`, which is rendered
-/// before this function runs.
-///
-/// Returns the uniform output map holding the BQL response `data` object under
-/// the `data` key. `mapper` extraction is applied afterwards by
-/// [`TaskContext::record_output`](super::TaskContext::record_output), like for
-/// every other action.
+/// Browser reuse is explicit: request `reconnect` in the query, store its
+/// `browserQLEndpoint` with a `mapper`, then set `url = "{{ ctx.<id>.<key> }}"`
+/// on the next action.
 pub(super) async fn execute_browserless_action(
     action: &BrowserlessAction,
     variables: &BTreeMap<String, String>,
@@ -39,7 +33,6 @@ pub(super) async fn execute_browserless_action(
 
     let mut response = parse_response(&payload)?;
 
-    // The BQL response `data` object is the action's output.
     let mut map = serde_json::Map::new();
     map.insert("data".to_string(), response["data"].take());
     Ok(OutputValue { data: map })

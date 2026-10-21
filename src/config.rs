@@ -22,18 +22,14 @@ pub struct Task {
 
 /// One entry in a task's `actions` list: an action body plus optional metadata.
 ///
-/// Parses inline tables like `{ id = "login", mapper = { code = "data" }, text = { text = "/start" } }`:
-/// - `id` identifies the action for `ctx.<id>.<key>` template references; it
-///   defaults to the action's 0-based index in the list. Accepts a string or
-///   an integer.
-/// - `mapper` describes how the action's output is converted into k:v pairs
-///   for storage: each entry is `key = "json_path"` relative to the output `data`.
+/// Parses inline tables like `{ id = "login", mapper = { code = "data" }, text = { text = "/start" } }`.
+/// `id` names the action for `ctx.<id>.<key>` references and defaults to its
+/// 0-based index; `mapper` turns the output into `key = "json_path"` pairs.
 #[derive(Debug, Serialize, Clone)]
 pub struct ActionEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// How the action's output is converted into k:v pairs for storage:
-    /// each entry is `key = "json_path"` relative to the output `data` value.
+    /// k:v pairs extracted from the output as `key = "json_path"`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub mapper: std::collections::BTreeMap<String, String>,
     #[serde(flatten)]
@@ -120,8 +116,7 @@ impl<'de> Deserialize<'de> for ActionEntry {
     }
 }
 
-/// Accepts a string or an integer for flexible fields like `id` (so both
-/// `id = 0` and `id = "login"` parse) and normalizes it to a string.
+/// Accepts a string or an integer (`id = 0` and `id = "login"` both parse).
 fn flexible_string<DE: DeError>(value: serde_json::Value, field: &str) -> Result<String, DE> {
     match value {
         serde_json::Value::String(text) => Ok(text),
@@ -132,10 +127,8 @@ fn flexible_string<DE: DeError>(value: serde_json::Value, field: &str) -> Result
     }
 }
 
-/// A single task action.
-///
-/// Serialized as an externally tagged TOML inline table, e.g. `{ text = { text = "" } }`.
-/// The enum makes "exactly one action body" a parse-time guarantee instead of a runtime check.
+/// A single task action, serialized as an externally tagged TOML inline table
+/// such as `{ text = { text = "" } }`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
@@ -171,11 +164,6 @@ pub struct LlmAction {
 }
 
 /// Browserless browser action executed through a Browserless BQL (GraphQL) endpoint.
-///
-/// Sessions are explicit: a query that requests `reconnect { browserQLEndpoint }`
-/// can store the endpoint with the entry-level `mapper` (see [`ActionEntry`]),
-/// and a later action reuses that browser with `url = "{{ ctx.<id>.<key> }}"`.
-/// Query variables are passed explicitly through `variables`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserlessAction {
@@ -185,13 +173,10 @@ pub struct BrowserlessAction {
     pub query: String,
     /// Optional GraphQL operation name.
     pub operation_name: String,
-    /// Browserless endpoint (defaults to production-sfo stealth BQL). Templates
-    /// are rendered, so it can be a previous action's reconnect endpoint.
+    /// Endpoint; defaults to the production-sfo stealth BQL URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// GraphQL variables sent with the query, e.g. `{ url = "{{ ctx.open.data }}" }`.
-    /// Nothing is passed implicitly; templates are rendered first. Telegram
-    /// miniapp links in the values are resolved to their web view URL.
+    /// GraphQL variables, e.g. `{ url = "{{ ctx.open.data }}" }`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub variables: std::collections::BTreeMap<String, String>,
 }
@@ -382,7 +367,6 @@ mod tests {
 
         assert_eq!(config.task[0].actions[0].id.as_deref(), Some("open"));
         assert_eq!(config.task[0].actions[1].id.as_deref(), Some("2"));
-        // id is optional and defaults to none (runtime falls back to the index).
         assert_eq!(config.task[0].actions[2].id, None);
 
         let output = to_inline_toml(&config);
@@ -402,7 +386,6 @@ mod tests {
 
     #[test]
     fn parses_and_serializes_entry_mapper_for_any_action() {
-        // mapper works on any action, not just browserless.
         let config = toml::from_str::<AppConfig>(
             r#"
             [[task]]

@@ -6,21 +6,22 @@
 //! [`OutputValue`] under its action id (default: 0-based index). An output's
 //! `data` is the action's result; its `mapper` converts it into named keys.
 //! Nothing is handed from one action to the next implicitly: string fields of
-//! later actions reference the values with `{{ ctx.<id>.<key> }}` templates
-//! (see [`template`]).
+//! later actions reference the values with `{{ ctx.<id>.<key> }}` templates,
+//! parsed and evaluated by the engine in [`crate::ast`].
 
 mod browserless;
 mod click;
 mod llm;
-mod template;
 
+use crate::ast;
 use crate::config::Action;
 use crate::miniapp;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use grammers_client::Client;
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::PeerRef;
 use grammers_client::tl;
+use serde_json::Value;
 
 /// Persistent state shared across all actions in a task.
 #[derive(Default)]
@@ -35,11 +36,6 @@ pub(super) struct TaskContext {
 
 impl TaskContext {
     /// Records `output` under `id`, after applying the entry's `mapper`.
-    ///
-    /// The `mapper` only describes how the output is converted into k:v pairs
-    /// for storage: each `key = "json_path"` entry stores the value at that
-    /// path (relative to the output `data` value) under `key`. It works the
-    /// same for every action.
     pub(super) fn record_output(
         &mut self,
         id: &str,
@@ -58,21 +54,19 @@ impl TaskContext {
     }
 }
 
-/// Converts the output into extra k:v pairs per `mapper`: `key = "json_path"`
-/// stores the value at that path (relative to the output `data` value) as `key`.
-/// A path that does not resolve is an error.
+/// Adds one `key` per `mapper` entry holding the value at its `json_path`
+/// (relative to the output `data`). A path that does not resolve is an error.
 fn apply_mapper(
     data: &mut serde_json::Map<String, serde_json::Value>,
     mapper: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     let source = data["data"].clone();
     for (key, path) in mapper {
-        // Strip an optional leading `data.` for uniformity with template paths.
         let path = path
             .strip_prefix("data.")
             .or_else(|| path.strip_prefix("$."))
             .unwrap_or(path);
-        let value = template::dig_json(&source, path)
+        let value = dig_json(&source, path)
             .with_context(|| format!("mapper `{key}`: path `{path}` not found in the output"))?;
         data.insert(key.clone(), serde_json::Value::String(value));
     }
@@ -80,10 +74,6 @@ fn apply_mapper(
 }
 
 /// What one completed action contributes to the task context: a uniform map.
-///
-/// Every action stores its result as `data` (the unified output shape). The
-/// entry's `mapper` converts it into further named k:v pairs. Later actions reference
-/// these values with `ctx.<id>.<key>` templates.
 #[derive(Clone, Debug, Default)]
 pub(super) struct OutputValue {
     /// The uniform output map. Key `data` holds the primary result; the entry's
@@ -91,15 +81,50 @@ pub(super) struct OutputValue {
     pub data: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Returns a copy of `action` with every string field resolved against the
-/// state recorded in `context` so far (`{{ctx.<id>.<key>}}` templates).
-///
-/// The whole action value tree goes through the template engine, so every
-/// string field — including fields added later — renders for free.
+/// Returns a copy of `action` with every string field rendered against the
+/// state recorded in `context` so far.
 pub(super) fn render_action(action: &Action, context: &TaskContext) -> Result<Action> {
     let value = serde_json::to_value(action).context("failed to serialize action for rendering")?;
-    let rendered = template::render_action_value(&value, context)?;
+    let root = Value::Object(context.state.clone());
+    let rendered =
+        render_json(&value, &root).map_err(|err| anyhow!("template render failed: {err}"))?;
     serde_json::from_value(rendered).context("failed to parse the rendered action")
+}
+
+/// Builds the template root `{"ctx": <state>}`.
+fn render_json(value: &Value, root: &Value) -> Result<Value> {
+    let ctx = {
+        let mut map = serde_json::Map::new();
+        map.insert("ctx".to_string(), root.clone());
+        Value::Object(map)
+    };
+    walk(value, &ctx)
+}
+
+/// Renders every string in `value` against `ctx`, keeping strings as strings.
+fn walk(value: &Value, ctx: &Value) -> Result<Value> {
+    Ok(match value {
+        Value::String(text) => Value::String(ast::render_string(text, ctx)?),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| walk(item, ctx))
+                .collect::<Result<_>>()?,
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, item)| Ok((key.clone(), walk(item, ctx)?)))
+                .collect::<Result<_>>()?,
+        ),
+        other => other.clone(),
+    })
+}
+
+/// Resolves a mapper `json_path` against an output `data` value, or `None`
+/// when the path does not resolve.
+fn dig_json(json: &Value, path: &str) -> Option<String> {
+    let expr = ast::parse_expr(path).ok()?;
+    ast::eval(&expr, json).ok().map(ast::stringify_terminal)
 }
 
 pub(super) async fn execute_action(
@@ -133,7 +158,6 @@ pub(super) async fn execute_action(
             let outcome =
                 click::click_inline_keyboard(client, peer, &click.key, previous_message.as_ref())
                     .await?;
-            // `data` is the callback answer text or the opened URL button link.
             let value = match outcome {
                 click::ClickOutcome::Answer(answer) => answer.unwrap_or_default(),
                 click::ClickOutcome::Url(url) => url,
@@ -164,6 +188,7 @@ fn output_data(value: impl Into<serde_json::Value>) -> serde_json::Map<String, s
 mod tests {
     use super::*;
     use crate::config::BrowserlessAction;
+    use serde_json::json;
     use std::collections::BTreeMap;
 
     fn browserless(url: Option<&str>, variables: BTreeMap<String, String>) -> Action {
@@ -257,5 +282,209 @@ mod tests {
         let rendered = render_browserless(browserless(None, variables), &context);
 
         assert_eq!(rendered.variables["url"], "https://one.example");
+    }
+
+    fn context_with(entries: &[(&str, Value)]) -> TaskContext {
+        let mut context = TaskContext::default();
+        for (key, map) in entries {
+            context.state.insert(
+                (*key).to_string(),
+                Value::Object(map.as_object().cloned().unwrap_or_default()),
+            );
+        }
+        context
+    }
+
+    fn map_from(pairs: &[(&str, Value)]) -> Value {
+        let mut map = serde_json::Map::new();
+        for (key, value) in pairs {
+            map.insert((*key).to_string(), value.clone());
+        }
+        Value::Object(map)
+    }
+
+    fn render_field(input: &str, context: &TaskContext) -> Result<String> {
+        let root = Value::Object(context.state.clone());
+        let rendered = render_json(&Value::String(input.to_string()), &root)?;
+        rendered
+            .as_str()
+            .map(str::to_string)
+            .context("expected the string field to stay a string after rendering")
+    }
+
+    #[test]
+    fn passes_plain_text_through() {
+        let context = context_with(&[]);
+        assert_eq!(
+            render_field("hello world", &context).unwrap(),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn renders_data_reference() {
+        let context = context_with(&[("0", map_from(&[("data", json!("123456"))]))]);
+        assert_eq!(
+            render_field("code: {{ctx.0.data}}", &context).unwrap(),
+            "code: 123456"
+        );
+    }
+
+    #[test]
+    fn accepts_whitespace_inside_braces() {
+        let context = context_with(&[("login", map_from(&[("data", json!("654321"))]))]);
+        assert_eq!(
+            render_field("code: {{ ctx.login.data }}", &context).unwrap(),
+            "code: 654321"
+        );
+    }
+
+    #[test]
+    fn renders_mapper_key() {
+        let context = context_with(&[(
+            "scrape",
+            map_from(&[
+                ("data", json!({ "text": { "text": "123456" } })),
+                ("code", json!("123456")),
+            ]),
+        )]);
+        assert_eq!(
+            render_field("{{ctx.scrape.code}}", &context).unwrap(),
+            "123456"
+        );
+    }
+
+    #[test]
+    fn renders_nested_data_path() {
+        let context = context_with(&[(
+            "0",
+            map_from(&[("data", json!({ "goto": { "status": 200 } }))]),
+        )]);
+        assert_eq!(
+            render_field("{{ctx.0.data.goto.status}}", &context).unwrap(),
+            "200"
+        );
+    }
+
+    #[test]
+    fn renders_array_subscript() {
+        let context = context_with(&[("0", map_from(&[("data", json!({ "items": [1, 2, 3] }))]))]);
+        assert_eq!(
+            render_field("{{ctx.0.data.items[0]}}", &context).unwrap(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn mixed_text_and_expressions() {
+        let context = context_with(&[
+            ("0", map_from(&[("data", json!("first"))])),
+            ("1", map_from(&[("data", json!("second"))])),
+        ]);
+        assert_eq!(
+            render_field("{{ctx.0.data}} and {{ctx.1.data}}", &context).unwrap(),
+            "first and second"
+        );
+    }
+
+    #[test]
+    fn whole_field_expression_stringifies_objects() {
+        let context = context_with(&[(
+            "0",
+            map_from(&[("data", json!({ "goto": { "status": 200 } }))]),
+        )]);
+        assert_eq!(
+            render_field("{{ctx.0.data}}", &context).unwrap(),
+            r#"{"goto":{"status":200}}"#
+        );
+    }
+
+    #[test]
+    fn unwraps_single_field_object() {
+        let context = context_with(&[("0", map_from(&[("data", json!({ "text": "654321" }))]))]);
+        assert_eq!(render_field("{{ctx.0.data}}", &context).unwrap(), "654321");
+    }
+
+    #[test]
+    fn null_value_renders_empty() {
+        let context = context_with(&[("0", map_from(&[("data", json!(null))]))]);
+        assert_eq!(render_field("[{{ctx.0.data}}]", &context).unwrap(), "[]");
+    }
+
+    #[test]
+    fn leaves_single_braces_untouched() {
+        let context = context_with(&[("0", map_from(&[("data", json!("x"))]))]);
+        assert_eq!(
+            render_field("mutation { goto { status } }", &context).unwrap(),
+            "mutation { goto { status } }"
+        );
+    }
+
+    #[test]
+    fn bare_reference_without_braces_is_literal() {
+        let context = context_with(&[("0", map_from(&[("data", json!("x"))]))]);
+        assert_eq!(
+            render_field("plain ctx.0.data text", &context).unwrap(),
+            "plain ctx.0.data text"
+        );
+    }
+
+    #[test]
+    fn unknown_id_fails() {
+        let context = context_with(&[("0", map_from(&[("data", json!("x"))]))]);
+        let err = render_field("{{ctx.missing.data}}", &context)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot resolve"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_key_fails() {
+        let context = context_with(&[("0", map_from(&[("data", json!("x"))]))]);
+        let err = render_field("{{ctx.0.nope}}", &context)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot resolve"), "got: {err}");
+    }
+
+    #[test]
+    fn unclosed_braces_fail() {
+        let context = context_with(&[]);
+        let err = render_field("hello {{task", &context)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unclosed"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_expression_fails() {
+        let context = context_with(&[]);
+        let err = render_field("{{}}", &context).unwrap_err().to_string();
+        assert!(err.contains("expected identifier"), "got: {err}");
+    }
+
+    #[test]
+    fn renders_every_string_in_an_action_value() {
+        let action = json!({
+            "text": {
+                "text": "验证码 {{ctx.scrape.code}}",
+                "note": "id 是 {{ctx.scrape.data.id}}"
+            }
+        });
+        let context = context_with(&[(
+            "scrape",
+            map_from(&[("data", json!({ "id": 7 })), ("code", json!("123456"))]),
+        )]);
+        let root = Value::Object(context.state.clone());
+        let rendered = render_json(&action, &root).unwrap();
+        assert_eq!(rendered["text"]["text"].as_str().unwrap(), "验证码 123456");
+        assert_eq!(rendered["text"]["note"].as_str().unwrap(), "id 是 7");
+    }
+
+    #[test]
+    fn dig_json_walks_nested_paths() {
+        let json = json!({ "a": { "b": { "c": "deep" } } });
+        assert_eq!(dig_json(&json, "a.b.c").unwrap(), "deep");
+        assert!(dig_json(&json, "a.missing").is_none());
     }
 }
