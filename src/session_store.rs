@@ -161,7 +161,6 @@ impl Session for RusqliteSession {
                         .optional()
                         .map_err(|_| SessionStoreError::NeverHappen)?
                 } else {
-                    // `peer` is the self-user sentinel; look up the row flagged as self.
                     conn.query_row(
                         "SELECT peer_id, hash, subtype FROM peer_info WHERE subtype & :subtype != 0 LIMIT 1",
                         named_params! {":subtype": USER_SELF},

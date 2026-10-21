@@ -1,6 +1,8 @@
+mod ast;
 mod commands;
 mod config;
 mod db;
+mod miniapp;
 mod session_store;
 mod telegram;
 

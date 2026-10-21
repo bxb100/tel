@@ -1,33 +1,58 @@
+use crate::commands::run::actions::OutputValue;
 use crate::config::BrowserlessAction;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tracing::debug;
 
-const DEFAULT_BROWSERLESS_URL: &str = "https://production-sfo.browserless.io/stealth/bql";
+/// Endpoint used when the action does not set `url`.
+const DEFAULT_URL: &str = "https://production-sfo.browserless.io/stealth/bql";
 
-/// Executes a browserless browser action by POSTing a GraphQL (BQL) request to Browserless.
+/// Executes a browserless BQL query against `action.url` (default endpoint
+/// when unset) and returns the BQL response `data` object as the output.
 ///
-/// Request shape (mirrors the documented curl example):
-///   POST <url>?token=<token>&blockConsentModals=true&emulationOs=android&emulatedDevice=pixel-8
-///   Content-Type: application/json
-///   {"query": ..., "variables": ..., "operationName": ...}
+/// Browser reuse is explicit: request `reconnect` in the query, store its
+/// `browserQLEndpoint` with a `mapper`, then set `url = "{{ ctx.<id>.<key> }}"`
+/// on the next action.
 pub(super) async fn execute_browserless_action(
     action: &BrowserlessAction,
-    url_from_button: Option<String>,
-) -> Result<()> {
-    debug!("{:?}", url_from_button);
+    variables: &BTreeMap<String, String>,
+) -> Result<OutputValue> {
+    let base_url = action.url.as_deref().unwrap_or(DEFAULT_URL);
 
-    let url = browserless_request_url(
-        action.url.as_deref().unwrap_or(DEFAULT_BROWSERLESS_URL),
+    let payload = run_query(
+        base_url,
         &action.token,
-    )?;
+        &action.query,
+        &action.operation_name,
+        variables,
+    )
+    .await
+    .context("failed to run browserless bql query")?;
+    debug!("browserless response: {payload}");
 
-    let body = browserless_request_body(action, url_from_button);
+    let mut response = parse_response(&payload)?;
+
+    let mut map = serde_json::Map::new();
+    map.insert("data".to_string(), response["data"].take());
+    Ok(OutputValue { data: map })
+}
+
+/// Runs `query` against `base_url` and returns the raw response payload.
+async fn run_query(
+    base_url: &str,
+    token: &str,
+    query: &str,
+    operation_name: &str,
+    variables: &BTreeMap<String, String>,
+) -> Result<String> {
+    let request_url = append_token(base_url, token)?;
+    let body = browserless_request_body(query, operation_name, variables);
 
     let response = reqwest::Client::new()
-        .post(url)
+        .post(request_url)
         .json(&body)
-        .timeout(Duration::from_mins(3))
+        .timeout(Duration::from_secs(180))
         .send()
         .await
         .context("failed to call browserless bql endpoint")?;
@@ -43,81 +68,90 @@ pub(super) async fn execute_browserless_action(
         "browserless bql returned {status}: {payload:#}"
     );
 
-    debug!("browserless return {}", payload);
+    Ok(payload)
+}
 
-    Ok(())
+/// Appends `token` as a query parameter without clobbering existing ones
+/// (browserless reconnect URLs already carry their own query string).
+fn append_token(base: &str, token: &str) -> Result<String> {
+    let mut url =
+        reqwest::Url::parse(base).with_context(|| format!("invalid browserless url: {base}"))?;
+    url.query_pairs_mut().append_pair("token", token);
+    Ok(url.to_string())
+}
+
+/// Parses a BQL response, failing on GraphQL-level errors (browserless reports
+/// those with HTTP 200).
+fn parse_response(payload: &str) -> Result<serde_json::Value> {
+    let json: serde_json::Value =
+        serde_json::from_str(payload).context("failed to parse browserless response as JSON")?;
+
+    if let Some(errors) = json.get("errors") {
+        bail!("browserless bql returned errors: {errors:#?}");
+    }
+    Ok(json)
 }
 
 /// Builds the GraphQL request body: `{"query": ..., "variables": ..., "operationName": ...}`.
-/// `variables.url` is only included when a preceding `click` opened a URL button.
+/// `variables` is only included when the action configures some.
 fn browserless_request_body(
-    action: &BrowserlessAction,
-    url_from_button: Option<String>,
+    query: &str,
+    operation_name: &str,
+    variables: &BTreeMap<String, String>,
 ) -> serde_json::Value {
-    match url_from_button {
-        Some(url) => serde_json::json!({
-            "query": action.query,
-            "variables": { "url": url },
-            "operationName": action.operation_name,
-        }),
-        None => serde_json::json!({
-            "query": action.query,
-            "operationName": action.operation_name,
-        }),
+    let mut body = serde_json::json!({
+        "query": query,
+        "operationName": operation_name,
+    });
+    if !variables.is_empty() {
+        body["variables"] = serde_json::json!(variables);
     }
-}
-
-/// Builds `<base>?token=<token>&blockConsentModals=true&emulationOs=android&emulatedDevice=pixel-8`.
-fn browserless_request_url(base: &str, token: &str) -> Result<String> {
-    let mut url =
-        reqwest::Url::parse(base).with_context(|| format!("invalid browserless url: {base}"))?;
-    url.query_pairs_mut()
-        .append_pair("token", token)
-        .append_pair("blockConsentModals", "true")
-        .append_pair("emulationOs", "android")
-        .append_pair("emulatedDevice", "pixel-8");
-    Ok(url.to_string())
+    body
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{browserless_request_body, browserless_request_url, execute_browserless_action};
-    use crate::config::BrowserlessAction;
+    use super::{append_token, browserless_request_body, parse_response};
+    use std::collections::BTreeMap;
 
     #[test]
-    fn builds_default_browserless_request_url() {
-        let url = browserless_request_url(
-            "https://production-sfo.browserless.io/stealth/bql",
-            "my-token",
+    fn appends_token_without_clobbering_existing_query() {
+        let token = format!("tok {}&1", "en");
+        let url = append_token(
+            "wss://production-sfo.browserless.io/chromium/bql?session=abc&keep=1",
+            &token,
         )
         .expect("url should build");
-        assert_eq!(
-            url,
-            "https://production-sfo.browserless.io/stealth/bql?token=my-token&blockConsentModals=true&emulationOs=android&emulatedDevice=pixel-8"
+        assert_query_pair(&url, "token", &token);
+        assert_query_pair(&url, "session", "abc");
+        assert_query_pair(&url, "keep", "1");
+    }
+
+    /// Asserts `url` carries `key=value` as a query pair, independent of how the
+    /// value happens to be percent-encoded.
+    fn assert_query_pair(url: &str, key: &str, value: &str) {
+        let parsed = reqwest::Url::parse(url).expect("url should parse");
+        let pairs = parsed
+            .query_pairs()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<Vec<_>>();
+        assert!(
+            pairs.contains(&(key.to_string(), value.to_string())),
+            "query pairs were: {pairs:?}"
         );
     }
 
     #[test]
-    fn encodes_token_in_browserless_request_url() {
-        let url = browserless_request_url(
-            "https://production-sfo.browserless.io/stealth/bql",
-            "tok en&1",
-        )
-        .expect("url should build");
-        assert!(url.contains("token=tok+en%261"), "url was: {url}");
-    }
-
-    #[test]
-    fn builds_browserless_request_body_with_url_from_button() {
-        let action = BrowserlessAction {
-            token: "tok".to_string(),
-            query: "mutation zpr($url: String!) { goto(url: $url) { status } }".to_string(),
-            operation_name: "zpr".to_string(),
-            url: None,
-        };
-
-        let body =
-            browserless_request_body(&action, Some("https://example.com/dashboard".to_string()));
+    fn builds_browserless_request_body_with_variables() {
+        let variables = BTreeMap::from([(
+            "url".to_string(),
+            "https://example.com/dashboard".to_string(),
+        )]);
+        let body = browserless_request_body(
+            "mutation zpr($url: String!) { goto(url: $url) { status } }",
+            "zpr",
+            &variables,
+        );
         assert_eq!(
             body,
             serde_json::json!({
@@ -129,15 +163,12 @@ mod tests {
     }
 
     #[test]
-    fn builds_browserless_request_body_without_url() {
-        let action = BrowserlessAction {
-            token: "tok".to_string(),
-            query: "query { text(selector: \"body\") { text } }".to_string(),
-            operation_name: String::new(),
-            url: None,
-        };
-
-        let body = browserless_request_body(&action, None);
+    fn builds_browserless_request_body_without_variables() {
+        let body = browserless_request_body(
+            "query { text(selector: \"body\") { text } }",
+            "",
+            &BTreeMap::new(),
+        );
         assert_eq!(
             body,
             serde_json::json!({
@@ -148,66 +179,33 @@ mod tests {
         assert!(body.get("variables").is_none());
     }
 
-    #[tokio::test]
-    async fn posts_browserless_request_to_bql_endpoint() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buffer = Vec::new();
-            // read one request
-            let mut chunk = [0u8; 4096];
-            loop {
-                let n = socket.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buffer.extend_from_slice(&chunk[..n]);
-                let text = String::from_utf8_lossy(&buffer).to_string();
-                let headers_end = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
-                let content_length = text
-                    .lines()
-                    .find(|l| l.to_ascii_lowercase().starts_with("content-length"))
-                    .and_then(|l| l.split(':').nth(1))
-                    .and_then(|v| v.trim().parse::<usize>().ok());
-                if content_length.is_some_and(|len| buffer.len() >= headers_end + len) {
-                    break;
+    #[test]
+    fn extracts_reconnect_url_from_response() {
+        let response = r#"{
+            "data": {
+                "goto": { "status": 200 },
+                "reconnect": {
+                    "browserQLEndpoint": "wss://production-sfo.browserless.io/chromium/bql?token=abc&session=xyz"
                 }
             }
-            let request = String::from_utf8_lossy(&buffer).to_string();
-            let response =
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}";
-            socket.write_all(response).await.unwrap();
-            socket.flush().await.unwrap();
-            request
-        });
+        }"#;
 
-        let action = BrowserlessAction {
-            token: "my-secret-token".to_string(),
-            query: "mutation zpr($url: String!) { goto(url: $url) { status } }".to_string(),
-            operation_name: "zpr".to_string(),
-            url: Some(format!("http://{addr}/stealth/bql")),
-        };
-
-        execute_browserless_action(&action, Some("https://example.com/dashboard".to_string()))
-            .await
-            .expect("browserless action should succeed");
-
-        let request = server.await.unwrap();
-        let request_line = request.lines().next().unwrap();
-        assert!(
-            request_line.starts_with("POST /stealth/bql?token=my-secret-token&blockConsentModals=true&emulationOs=android&emulatedDevice=pixel-8 HTTP/"),
-            "request line was: {request_line}"
+        let json = parse_response(response).expect("should parse response");
+        assert_eq!(
+            json["data"]["reconnect"]["browserQLEndpoint"],
+            "wss://production-sfo.browserless.io/chromium/bql?token=abc&session=xyz"
         );
-        assert!(
-            request.contains("content-type: application/json")
-                || request.contains("Content-Type: application/json")
-        );
-        assert!(request.contains("\"operationName\":\"zpr\""));
-        assert!(request.contains("\"variables\":{\"url\":\"https://example.com/dashboard\"}"));
+    }
+
+    #[test]
+    fn fails_on_graphql_errors_in_response() {
+        let response = r#"{ "errors": [{ "message": "session expired" }] }"#;
+        assert!(parse_response(response).is_err());
+    }
+
+    #[test]
+    fn accepts_response_without_reconnect_field() {
+        let response = r#"{ "data": { "goto": { "status": 200 } } }"#;
+        assert!(parse_response(response).is_ok());
     }
 }

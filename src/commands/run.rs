@@ -3,7 +3,7 @@ mod actions;
 use crate::config::{AppConfig, Task};
 use crate::db::{Db, SessionData};
 use crate::telegram::TelegramConnection;
-use actions::{Carry, execute_action};
+use actions::{TaskContext, execute_action, render_action};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use cron::Schedule;
@@ -131,11 +131,21 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
     let peer = resolve_task_peer(client, task).await?;
     wait_for_task_trigger(task).await?;
 
-    let mut carry = Carry::None;
-    for action in &task.actions {
-        carry = execute_action(client, peer, action, carry).await?;
+    let mut context = TaskContext::default();
+
+    for (index, entry) in task.actions.iter().enumerate() {
+        // id defaults to the 0-based action index when not configured.
+        let id = entry.id.clone().unwrap_or_else(|| index.to_string());
+
+        let rendered = render_action(&entry.action, &context)?;
+        let output = execute_action(client, peer, &rendered, &mut context).await?;
+        context.record_output(&id, &entry.mapper, output)?;
+
         if let Some(sleep) = apply_delay(task).await {
-            debug!("Waiting {sleep}s before execute {action:?}")
+            debug!(
+                "Waiting {sleep}s before execute {action:?}",
+                action = entry.action
+            )
         }
     }
 

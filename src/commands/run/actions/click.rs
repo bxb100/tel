@@ -12,23 +12,28 @@ const CLICK_LOOKUP_LIMIT: usize = 30;
 const CLICK_LOOKUP_ATTEMPTS: usize = 15;
 const CLICK_LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
 
+/// What a completed `click` action produced.
+pub(super) enum ClickOutcome {
+    /// A callback button was clicked; carries the bot's answer text, if it replied.
+    Answer(Option<String>),
+    /// A URL button was matched; carries its target.
+    Url(String),
+}
+
 /// Clicks the inline keyboard button matching `key` (prefix match).
 ///
-/// Checks `previous_message` first, then scans the chat's recent messages (retrying while
-/// the bot may still be composing its reply). Returns:
-/// - `Ok(None)` — a callback button was clicked
-/// - `Ok(Some(url))` — a URL button was matched; its target is returned for a following
-///   `browserless` action to consume as `variables.url`
+/// Checks `previous_message` first, then scans the chat's recent messages,
+/// retrying while the bot may still be composing its reply.
 pub(super) async fn click_inline_keyboard(
     client: &Client,
     peer: PeerRef,
     key: &str,
     previous_message: Option<&Message>,
-) -> Result<Option<String>> {
+) -> Result<ClickOutcome> {
     let mut unsupported_match = None;
 
     enum ClickButtonResult {
-        Clicked,
+        Clicked(Option<String>),
         Url(String),
         Unsupported(String),
         NotFound,
@@ -41,8 +46,8 @@ pub(super) async fn click_inline_keyboard(
         async move {
             match matched {
                 Some(InlineButtonMatch::Callback(data)) => {
-                    click_inline_callback(client, peer, message_id, data).await?;
-                    Ok::<ClickButtonResult, anyhow::Error>(ClickButtonResult::Clicked)
+                    let answer_text = click_inline_callback(client, peer, message_id, data).await?;
+                    Ok::<ClickButtonResult, anyhow::Error>(ClickButtonResult::Clicked(answer_text))
                 }
                 Some(InlineButtonMatch::Url(url)) => Ok(ClickButtonResult::Url(url)),
                 Some(InlineButtonMatch::Unsupported(text)) => {
@@ -53,23 +58,25 @@ pub(super) async fn click_inline_keyboard(
         }
     };
 
-    // normal path
     if let Some(message) = previous_message {
         match click_button(message, key).await? {
-            ClickButtonResult::Clicked => return Ok(None),
-            ClickButtonResult::Url(url) => return Ok(Some(url)),
+            ClickButtonResult::Clicked(answer_text) => {
+                return Ok(ClickOutcome::Answer(answer_text));
+            }
+            ClickButtonResult::Url(url) => return Ok(ClickOutcome::Url(url)),
             ClickButtonResult::Unsupported(text) => unsupported_match = Some(text),
             ClickButtonResult::NotFound => {}
         }
     }
 
-    // fallback path
     for attempt in 0..CLICK_LOOKUP_ATTEMPTS {
         let mut messages = client.iter_messages(peer).limit(CLICK_LOOKUP_LIMIT);
         while let Some(ref message) = messages.next().await? {
             match click_button(message, key).await? {
-                ClickButtonResult::Clicked => return Ok(None),
-                ClickButtonResult::Url(url) => return Ok(Some(url)),
+                ClickButtonResult::Clicked(answer_text) => {
+                    return Ok(ClickOutcome::Answer(answer_text));
+                }
+                ClickButtonResult::Url(url) => return Ok(ClickOutcome::Url(url)),
                 ClickButtonResult::Unsupported(text) => unsupported_match = Some(text),
                 ClickButtonResult::NotFound => {}
             }
@@ -94,7 +101,7 @@ async fn click_inline_callback(
     peer: PeerRef,
     message_id: i32,
     data: Vec<u8>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let answer = client
         .invoke(&tl::functions::messages::GetBotCallbackAnswer {
             game: false,
@@ -104,10 +111,11 @@ async fn click_inline_callback(
             password: None,
         })
         .await?;
-    if let Some(text) = callback_answer_text(answer) {
+    let text = callback_answer_text(answer);
+    if let Some(text) = text.as_deref() {
         info!("{text}");
     }
-    Ok(())
+    Ok(text)
 }
 
 fn callback_answer_text(answer: tl::enums::messages::BotCallbackAnswer) -> Option<String> {

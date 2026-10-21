@@ -1,0 +1,3 @@
+schema:
+  - https://production-sfo.browserless.io/chromium/bql?token=${BROWSERLESS_TOKEN}
+documents: "**/*.graphql"
