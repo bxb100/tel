@@ -203,22 +203,27 @@ pub fn render(tpl: &Template, ctx: &Value) -> Result<Value> {
     Ok(Value::String(out))
 }
 
-/// 递归渲染整份配置里的所有字符串，返回新 Value
-pub fn render_value(value: &Value, ctx: &Value) -> Result<Value> {
-    Ok(match value {
-        Value::String(text) => render(&parse_template(text)?, ctx)?,
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| render_value(item, ctx))
-                .collect::<Result<_>>()?,
-        ),
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, item)| Ok((key.clone(), render_value(item, ctx)?)))
-                .collect::<Result<_>>()?,
-        ),
-        other => other.clone(),
+/// 把单个值渲染成字符串：字符串原样，null 为空，单字段对象解包，
+/// 其余按 JSON 写法。
+pub fn stringify_terminal(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        // `{"text": "123456"}` 这类单字段对象解包成它的标量。
+        Value::Object(map) if map.len() == 1 => match map.values().next() {
+            Some(inner) if !inner.is_object() && !inner.is_array() => stringify_terminal(inner),
+            _ => value.to_string(),
+        },
+        _ => value.to_string(),
+    }
+}
+
+/// 渲染一个字符串，但结果始终保持字符串：即使整串只有一个表达式，
+/// 也把取出值按 [`stringify_terminal`] 转成文本。
+pub fn render_string(src: &str, ctx: &Value) -> Result<String> {
+    Ok(match render(&parse_template(src)?, ctx)? {
+        Value::String(text) => text,
+        other => stringify_terminal(&other),
     })
 }
 
@@ -312,16 +317,27 @@ mod tests {
     }
 
     #[test]
-    fn render_value_walks_nested_structures() {
-        let ctx = json!({ "v": "1" });
-        let rendered = render_value(
-            &json!({ "a": ["{{v}}", { "b": "x{{v}}" }], "n": 3, "t": true }),
-            &ctx,
-        )
-        .unwrap();
+    fn render_string_always_returns_a_string() {
+        let ctx = json!({ "s": "x", "n": 7, "z": null, "o": { "k": 1 } });
+        assert_eq!(render_string("{{s}}", &ctx).unwrap(), "x");
+        assert_eq!(render_string("{{n}}", &ctx).unwrap(), "7");
+        assert_eq!(render_string("{{z}}", &ctx).unwrap(), "");
+        // 单字段对象解包成标量，多字段对象按 JSON 写法。
+        assert_eq!(render_string("{{o}}", &ctx).unwrap(), "1");
         assert_eq!(
-            rendered,
-            json!({ "a": ["1", { "b": "x1" }], "n": 3, "t": true })
+            render_string("{{m}}", &json!({ "m": { "a": 1, "b": 2 } })).unwrap(),
+            r#"{"a":1,"b":2}"#
         );
+        assert_eq!(render_string("v={{n}}", &ctx).unwrap(), "v=7");
+    }
+
+    #[test]
+    fn stringify_terminal_unwraps_scalar_objects() {
+        assert_eq!(stringify_terminal(&json!({ "only": "value" })), "value");
+        assert_eq!(
+            stringify_terminal(&json!({ "a": 1, "b": 2 })),
+            r#"{"a":1,"b":2}"#
+        );
+        assert_eq!(stringify_terminal(&json!([1, 2])), "[1,2]");
     }
 }

@@ -1,5 +1,10 @@
-//! `{{ctx.<id>.<key>}}` template support for action string parameters,
-//! powered by the hand-written AST engine in [`crate::ast`].
+//! `{{ctx.<id>.<key>}}` template support for action string parameters.
+//!
+//! This module is only the thin adapter between the run command's
+//! [`TaskContext`] and the template engine in [`crate::ast`]: it builds the
+//! `{"ctx": <state>}` root and keeps action config fields as strings. Parsing,
+//! path resolution, error messages and recursive rendering all live in
+//! [`crate::ast`].
 //!
 //! Every string field of an action (text, click key, llm prompt, browserless
 //! query, ...) may reference the output map of a previously completed action
@@ -25,101 +30,43 @@ use serde_json::Value;
 /// Renders every string field of the serialized `action` against the state
 /// recorded in `context`.
 ///
-/// This is the production entry point: the whole action value tree goes
-/// through [`ast::render_value`], so every string field — including fields
-/// added to action configs later — picks up `{{ ... }}` rendering for free.
+/// Every string of the tree is rendered by [`ast::render_string`], so rendered
+/// fields stay strings — action config fields are strings, and a whole-field
+/// expression still surfaces the raw value as text.
 pub(super) fn render_action_value(action: &Value, context: &TaskContext) -> Result<Value> {
-    let ctx = context_value(context);
-    let rendered =
-        ast::render_value(action, &ctx).map_err(|err| anyhow!("template render failed: {err}"))?;
-    Ok(coerce_strings(action, rendered))
-}
-
-/// Builds the template context: `{"ctx": <state>}`.
-///
-/// `ctx` is the engine-visible root, so `{{ctx.<id>.<key>}}` parses and
-/// evaluates as one plain path into the context state.
-fn context_value(context: &TaskContext) -> Value {
     let mut root = serde_json::Map::new();
     root.insert("ctx".to_string(), Value::Object(context.state.clone()));
-    Value::Object(root)
+    render(action, &Value::Object(root)).map_err(|err| anyhow!("template render failed: {err}"))
 }
 
-/// Walks `(original, rendered)` pairs: positions that were strings in the
-/// original stringify their rendered value.
+/// Walks the action tree, rendering every string with [`ast::render_string`]
+/// so the field keeps its string type.
+fn render(value: &Value, ctx: &Value) -> Result<Value> {
+    Ok(match value {
+        Value::String(text) => Value::String(ast::render_string(text, ctx)?),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| render(item, ctx))
+                .collect::<Result<_>>()?,
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, item)| Ok((key.clone(), render(item, ctx)?)))
+                .collect::<Result<_>>()?,
+        ),
+        other => other.clone(),
+    })
+}
+
+/// Resolves a mapper `json_path` against an output `data` value, or `None`
+/// when the path does not resolve.
 ///
-/// [`ast::render_value`] preserves a single-expression field's type (a number
-/// stays a number), but action config fields are strings — coercion keeps the
-/// tree deserializable while whole-field expressions still surface the raw
-/// value as text.
-fn coerce_strings(original: &Value, rendered: Value) -> Value {
-    match original {
-        Value::String(_) => Value::String(stringify(&rendered)),
-        Value::Array(items) => match rendered {
-            Value::Array(values) => Value::Array(
-                values
-                    .into_iter()
-                    .zip(items.iter().chain(std::iter::repeat(&Value::Null)))
-                    .map(|(value, original)| coerce_strings(original, value))
-                    .collect(),
-            ),
-            other => other,
-        },
-        Value::Object(fields) => match rendered {
-            Value::Object(values) => Value::Object(
-                values
-                    .into_iter()
-                    .map(|(key, value)| {
-                        let original = fields.get(&key).unwrap_or(&Value::Null);
-                        (key, coerce_strings(original, value))
-                    })
-                    .collect(),
-            ),
-            other => other,
-        },
-        _ => rendered,
-    }
-}
-
-/// Renders a value as a string: strings verbatim, null as empty, numbers and
-/// booleans via `to_string`, single-field objects unwrapped to their scalar.
-fn stringify(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::String(text) => text.clone(),
-        other => stringify_terminal(other),
-    }
-}
-
-/// Walks a `.`-separated path into a JSON value, stringifying the terminal.
-///
-/// Used by the entry-level mapper to resolve its `key = "json_path"` entries
-/// against an output `data` value.
-pub(super) fn dig_json(json: &Value, path: &[&str]) -> Option<String> {
-    let mut current = json;
-    for segment in path {
-        current = current.get(segment)?;
-    }
-    Some(stringify_terminal(current))
-}
-
-/// Renders a JSON terminal: strings verbatim, scalars via `to_string`, and
-/// single-field objects unwrapped to their scalar value.
-fn stringify_terminal(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Object(map) => {
-            // A single-field object like `{"text": "123456"}` unwraps to the value.
-            if map.len() == 1 {
-                let inner = map.values().next().expect("single field");
-                if !inner.is_object() && !inner.is_array() {
-                    return stringify_terminal(inner);
-                }
-            }
-            value.to_string()
-        }
-        _ => value.to_string(),
-    }
+/// The path is read with the same grammar as a `{{ ... }}` expression, so
+/// mapper paths and template paths behave identically.
+pub(super) fn dig_json(json: &Value, path: &str) -> Option<String> {
+    let expr = ast::parse_expr(path).ok()?;
+    ast::eval(&expr, json).ok().map(ast::stringify_terminal)
 }
 
 #[cfg(test)]
@@ -148,7 +95,7 @@ mod tests {
     }
 
     /// Renders one string through the production entry point.
-    fn render(input: &str, context: &TaskContext) -> Result<String> {
+    fn render_field(input: &str, context: &TaskContext) -> Result<String> {
         let rendered = render_action_value(&Value::String(input.to_string()), context)?;
         rendered
             .as_str()
@@ -159,14 +106,17 @@ mod tests {
     #[test]
     fn passes_plain_text_through() {
         let context = context_with(&[]);
-        assert_eq!(render("hello world", &context).unwrap(), "hello world");
+        assert_eq!(
+            render_field("hello world", &context).unwrap(),
+            "hello world"
+        );
     }
 
     #[test]
     fn renders_data_reference() {
         let context = context_with(&[("0", map_from(&[("data", json!("123456"))]))]);
         assert_eq!(
-            render("code: {{ctx.0.data}}", &context).unwrap(),
+            render_field("code: {{ctx.0.data}}", &context).unwrap(),
             "code: 123456"
         );
     }
@@ -175,7 +125,7 @@ mod tests {
     fn accepts_whitespace_inside_braces() {
         let context = context_with(&[("login", map_from(&[("data", json!("654321"))]))]);
         assert_eq!(
-            render("code: {{ ctx.login.data }}", &context).unwrap(),
+            render_field("code: {{ ctx.login.data }}", &context).unwrap(),
             "code: 654321"
         );
     }
@@ -189,7 +139,10 @@ mod tests {
                 ("code", json!("123456")),
             ]),
         )]);
-        assert_eq!(render("{{ctx.scrape.code}}", &context).unwrap(), "123456");
+        assert_eq!(
+            render_field("{{ctx.scrape.code}}", &context).unwrap(),
+            "123456"
+        );
     }
 
     #[test]
@@ -199,7 +152,7 @@ mod tests {
             map_from(&[("data", json!({ "goto": { "status": 200 } }))]),
         )]);
         assert_eq!(
-            render("{{ctx.0.data.goto.status}}", &context).unwrap(),
+            render_field("{{ctx.0.data.goto.status}}", &context).unwrap(),
             "200"
         );
     }
@@ -207,7 +160,10 @@ mod tests {
     #[test]
     fn renders_array_subscript() {
         let context = context_with(&[("0", map_from(&[("data", json!({ "items": [1, 2, 3] }))]))]);
-        assert_eq!(render("{{ctx.0.data.items[0]}}", &context).unwrap(), "1");
+        assert_eq!(
+            render_field("{{ctx.0.data.items[0]}}", &context).unwrap(),
+            "1"
+        );
     }
 
     #[test]
@@ -217,7 +173,7 @@ mod tests {
             ("1", map_from(&[("data", json!("second"))])),
         ]);
         assert_eq!(
-            render("{{ctx.0.data}} and {{ctx.1.data}}", &context).unwrap(),
+            render_field("{{ctx.0.data}} and {{ctx.1.data}}", &context).unwrap(),
             "first and second"
         );
     }
@@ -229,7 +185,7 @@ mod tests {
             map_from(&[("data", json!({ "goto": { "status": 200 } }))]),
         )]);
         assert_eq!(
-            render("{{ctx.0.data}}", &context).unwrap(),
+            render_field("{{ctx.0.data}}", &context).unwrap(),
             r#"{"goto":{"status":200}}"#
         );
     }
@@ -237,13 +193,13 @@ mod tests {
     #[test]
     fn unwraps_single_field_object() {
         let context = context_with(&[("0", map_from(&[("data", json!({ "text": "654321" }))]))]);
-        assert_eq!(render("{{ctx.0.data}}", &context).unwrap(), "654321");
+        assert_eq!(render_field("{{ctx.0.data}}", &context).unwrap(), "654321");
     }
 
     #[test]
     fn null_value_renders_empty() {
         let context = context_with(&[("0", map_from(&[("data", json!(null))]))]);
-        assert_eq!(render("[{{ctx.0.data}}]", &context).unwrap(), "[]");
+        assert_eq!(render_field("[{{ctx.0.data}}]", &context).unwrap(), "[]");
     }
 
     #[test]
@@ -251,7 +207,7 @@ mod tests {
         let context = context_with(&[("0", map_from(&[("data", json!("x"))]))]);
         // GraphQL-style single braces are literal text.
         assert_eq!(
-            render("mutation { goto { status } }", &context).unwrap(),
+            render_field("mutation { goto { status } }", &context).unwrap(),
             "mutation { goto { status } }"
         );
     }
@@ -260,7 +216,7 @@ mod tests {
     fn bare_reference_without_braces_is_literal() {
         let context = context_with(&[("0", map_from(&[("data", json!("x"))]))]);
         assert_eq!(
-            render("plain ctx.0.data text", &context).unwrap(),
+            render_field("plain ctx.0.data text", &context).unwrap(),
             "plain ctx.0.data text"
         );
     }
@@ -268,7 +224,7 @@ mod tests {
     #[test]
     fn unknown_id_fails() {
         let context = context_with(&[("0", map_from(&[("data", json!("x"))]))]);
-        let err = render("{{ctx.missing.data}}", &context)
+        let err = render_field("{{ctx.missing.data}}", &context)
             .unwrap_err()
             .to_string();
         assert!(err.contains("cannot resolve"), "got: {err}");
@@ -277,21 +233,25 @@ mod tests {
     #[test]
     fn unknown_key_fails() {
         let context = context_with(&[("0", map_from(&[("data", json!("x"))]))]);
-        let err = render("{{ctx.0.nope}}", &context).unwrap_err().to_string();
+        let err = render_field("{{ctx.0.nope}}", &context)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cannot resolve"), "got: {err}");
     }
 
     #[test]
     fn unclosed_braces_fail() {
         let context = context_with(&[]);
-        let err = render("hello {{task", &context).unwrap_err().to_string();
+        let err = render_field("hello {{task", &context)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unclosed"), "got: {err}");
     }
 
     #[test]
     fn empty_expression_fails() {
         let context = context_with(&[]);
-        let err = render("{{}}", &context).unwrap_err().to_string();
+        let err = render_field("{{}}", &context).unwrap_err().to_string();
         assert!(err.contains("expected identifier"), "got: {err}");
     }
 
@@ -316,13 +276,7 @@ mod tests {
     #[test]
     fn dig_json_walks_nested_paths() {
         let json = json!({ "a": { "b": { "c": "deep" } } });
-        assert_eq!(dig_json(&json, &["a", "b", "c"]).unwrap(), "deep");
-        assert!(dig_json(&json, &["a", "missing"]).is_none());
-    }
-
-    #[test]
-    fn stringify_terminal_unwraps_scalar_objects() {
-        let json = json!({ "only": "value" });
-        assert_eq!(stringify_terminal(&json), "value");
+        assert_eq!(dig_json(&json, "a.b.c").unwrap(), "deep");
+        assert!(dig_json(&json, "a.missing").is_none());
     }
 }

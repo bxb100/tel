@@ -68,9 +68,11 @@ fn apply_mapper(
     let source = data["data"].clone();
     for (key, path) in mapper {
         // Strip an optional leading `data.` for uniformity with template paths.
-        let path = path.strip_prefix("data.").unwrap_or(path);
-        let segments: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
-        let value = template::dig_json(&source, &segments)
+        let path = path
+            .strip_prefix("data.")
+            .or_else(|| path.strip_prefix("$."))
+            .unwrap_or(path);
+        let value = template::dig_json(&source, path)
             .with_context(|| format!("mapper `{key}`: path `{path}` not found in the output"))?;
         data.insert(key.clone(), serde_json::Value::String(value));
     }
