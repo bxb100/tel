@@ -2,7 +2,7 @@ name: Run tel task
 description: Download the released tel binary and run task config TOML against a Telegram session.
 
 inputs:
-  task_data_url:
+  task_path:
     description: URL to the task config TOML text.
     required: true
   session_path:
@@ -17,6 +17,11 @@ inputs:
     required: false
     default: ""
 
+outputs:
+  log_path:
+    description: Path to the local log file that holds the tel run output.
+    value: ${{ steps.run-task.outputs.log_path }}
+
 runs:
   using: composite
   steps:
@@ -24,7 +29,7 @@ runs:
       shell: bash
       env:
         DECRYPT_KEY: ${{ inputs.decrypt_key }}
-        TASK_DATA_URL: ${{ inputs.task_data_url }}
+        TASK_PATH: ${{ inputs.task_path }}
         ACTION_REPO: ${{ github.action_repository }}
         WORKFLOW_REPO: ${{ github.repository }}
         GH_TOKEN: ${{ github.token }}
@@ -36,7 +41,7 @@ runs:
           echo "GPG_DECRYPT_KEY=${DECRYPT_KEY}" >> "$GITHUB_ENV"
         fi
         cat >> "$GITHUB_ENV" <<EOF
-        TASK_DATA_URL=${TASK_DATA_URL}
+        TASK_PATH=${TASK_PATH}
         ACTION_REPOSITORY=${ACTION_REPO}
         WORKFLOW_REPOSITORY=${WORKFLOW_REPO}
         GH_TOKEN=${GH_TOKEN}
@@ -44,19 +49,20 @@ runs:
         TASK_NAME=${TASK_NAME}
         EOF
 
-    - name: Write task config
+    - name: Resolve task config
       shell: bash
-      run: "${GITHUB_ACTION_PATH}/scripts/write-task-config.sh"
-
-    - name: Download release binary
-      shell: bash
-      run: "${GITHUB_ACTION_PATH}/scripts/download-release.sh"
+      run: "${GITHUB_ACTION_PATH}/scripts/resolve-config.sh"
 
     - name: Resolve session file
       shell: bash
       run: "${GITHUB_ACTION_PATH}/scripts/resolve-session.sh"
 
+    - name: Download release binary
+      shell: bash
+      run: "${GITHUB_ACTION_PATH}/scripts/download-release.sh"
+
     - name: Run task
+      id: run-task
       shell: bash
       run: "${GITHUB_ACTION_PATH}/scripts/run-task.sh"
 
