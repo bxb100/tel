@@ -7,4 +7,11 @@ description = "Upload file to r2 by rclone"
 usage = '''
 arg "<file>" help="File path"
 '''
-run = "rclone copyto ${usage_file} r2:action/${usage_file} -cuP"
+run = "rclone copyto ${usage_file} r2:{{ vars.bucket | default(value='action') }}/${usage_file} -cuP"
+
+[tasks.download]
+description = "Download file from R2"
+usage = '''
+arg "<file>" help="File path"
+'''
+run = "rclone copyto r2:{{ vars.bucket | default(value='action') }}/${usage_file} ${usage_file} -cuP"
