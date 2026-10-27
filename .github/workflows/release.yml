@@ -30,7 +30,7 @@ jobs:
           tar -czf "tel-linux-x86_64.tar.gz" -C dist "tel"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: tel-linux-x86_64.tar.gz
           path: tel-linux-x86_64.tar.gz
