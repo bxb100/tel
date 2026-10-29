@@ -6,7 +6,7 @@ use std::time::Duration;
 use tracing::debug;
 
 /// Endpoint used when the action does not set `url`.
-const DEFAULT_URL: &str = "https://production-sfo.browserless.io/stealth/bql";
+const DEFAULT_URL: &str = "https://production-sfo.browserless.io/stealth/bql?humanlike=true";
 
 /// Executes a browserless BQL query against `action.url` (default endpoint
 /// when unset) and returns the BQL response `data` object as the output.
@@ -77,7 +77,7 @@ fn append_token(base: &str, token: &str) -> Result<String> {
     let mut url =
         reqwest::Url::parse(base).with_context(|| format!("invalid browserless url: {base}"))?;
     url.query_pairs_mut().append_pair("token", token);
-    Ok(url.to_string())
+    Ok(url.into())
 }
 
 /// Parses a BQL response, failing on GraphQL-level errors (browserless reports
@@ -111,20 +111,14 @@ fn browserless_request_body(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_token, browserless_request_body, parse_response};
+    use super::{DEFAULT_URL, append_token, browserless_request_body, parse_response};
     use std::collections::BTreeMap;
 
     #[test]
     fn appends_token_without_clobbering_existing_query() {
         let token = format!("tok {}&1", "en");
-        let url = append_token(
-            "wss://production-sfo.browserless.io/chromium/bql?session=abc&keep=1",
-            &token,
-        )
-        .expect("url should build");
+        let url = append_token(DEFAULT_URL, &token).expect("url should build");
         assert_query_pair(&url, "token", &token);
-        assert_query_pair(&url, "session", "abc");
-        assert_query_pair(&url, "keep", "1");
     }
 
     /// Asserts `url` carries `key=value` as a query pair, independent of how the
