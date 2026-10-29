@@ -9,4 +9,7 @@ if [[ -n "${TASK_NAME:-}" ]]; then
   args+=(--task "${TASK_NAME}")
 fi
 
-tel "${args[@]}" 2>&1 | tee "${log_path}" | sed -u $'/\x1b\\[34mDEBUG\x1b\\[0m/d'
+tel "${args[@]}" 2>&1 | tee "${log_path}" | awk -v dim=$'\033[2m' -v debug=$'\033[34mDEBUG\033[0m' '
+  index($0, dim) == 1 { drop = index($0, debug) > 0 }
+  !drop { print; fflush() }
+'
