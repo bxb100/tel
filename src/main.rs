@@ -7,7 +7,7 @@ mod session_store;
 mod telegram;
 
 use clap::{Parser, Subcommand};
-use commands::{gen_config, login, logout, run};
+use commands::{config as config_cmd, gen_config, login, logout, run};
 
 #[derive(Parser)]
 #[command(name = "tel", about = "A telegram MTProto API CLI")]
@@ -26,6 +26,15 @@ enum Commands {
     Gen {
         #[command(subcommand)]
         command: GenCommands,
+    },
+    /// Configuration tools
+    Config {
+        /// Validate configuration file
+        #[arg(long, short)]
+        validate: bool,
+        /// Path to configuration TOML file
+        #[arg(default_value = "tasks.toml")]
+        path: String,
     },
     /// Run tasks
     Run {
@@ -62,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Gen { command } => match command {
             GenCommands::Task => gen_config::execute_task().await?,
         },
+        Commands::Config { validate, path } => config_cmd::execute(*validate, path)?,
         Commands::Run {
             config,
             user,

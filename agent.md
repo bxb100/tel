@@ -32,11 +32,18 @@ delay = 30
 actions = [
    { text = { text = "" } },
    { dice = { dice = "name str, cli prompt with emoji like: DICE= '🎲' BASKETBALL= '🏀' , DARTS= '🎯'" } },
-   { click = { key = "the key to click, prefix match on inline keyboard buttons" } },
+   { click = { key = "the key to click, prefix match on inline keyboard buttons", jev = false } },
+   # When jev = true, message text is sent as state to System One API with inline buttons as choice options.
+   # `choice` optionally specifies the JSON path to the choice in the API response (defaults to "/answers/choice/choice").
+   { click = { jev = true, choice = "/answers/choice/choice" } },
    { llm = { prompt = "user custom prompt, and the LLM(openai compatible api) call tool: task_action(action_type, options)" } },
    { browserless = { token = "browserless token", query = "BQL(GraphQL) query or mutation", operation_name = "optional", url = "optional, defaults to https://production-sfo.browserless.io/stealth/bql" } },
 ]
 ```
+
+Global `[jev]` config can also be set at the root of the configuration file. It applies to clicks without `key`; set `jev = true` on a click with `key` to treat the key as instructions.
+
+JSON paths in `mapper` and `choice` accept both dotted paths (`data.text.text`, `ctx.0.data.items[0]`) and JSON Pointer paths (`/data/text/text`).
 
 `click` on a URL-type inline button returns the button's URL; a following `browserless` action picks it up as `variables.url`.
 
@@ -68,6 +75,10 @@ actions = [
    { browserless = { token = "TOKEN", query = "mutation zpr($url: String!) { goto(url: $url) { status } }", operation_name = "zpr" } },
 ]
 ```
+
+### Config
+
+- `--validate` (`-v`): Validate configuration file syntax, tasks, cron expressions, and action templates without executing. Defaults to `tasks.toml`.
 
 ### Run
 

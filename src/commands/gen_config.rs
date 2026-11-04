@@ -1,6 +1,6 @@
 use crate::config::{
-    Action, ActionEntry, AppConfig, BrowserlessAction, ClickAction, DiceAction, LlmAction, Task,
-    TextAction, to_inline_toml,
+    Action, ActionEntry, AppConfig, BrowserlessAction, ClickAction, DICE_EMOTICONS, DiceAction,
+    LlmAction, Task, TextAction, to_inline_toml,
 };
 use inquire::{Confirm, Editor, Select, Text};
 use std::fs;
@@ -36,15 +36,30 @@ pub async fn execute_task() -> anyhow::Result<()> {
                     Action::Text(TextAction { text })
                 }
                 "dice" => {
-                    let dice = Select::new("Dice type:", vec!["🎲", "🏀", "🎯", "⚽", "🎳", "🎰"])
-                        .prompt()?;
+                    let dice = Select::new("Dice type:", DICE_EMOTICONS.to_vec()).prompt()?;
                     Action::Dice(DiceAction {
                         dice: dice.to_string(),
                     })
                 }
                 "click" => {
-                    let key = Text::new("Key to click:").prompt()?;
-                    Action::Click(ClickAction { key })
+                    let use_jev = Confirm::new("Use JEV (System One)?")
+                        .with_default(false)
+                        .prompt()?;
+                    let (key, choice) = if use_jev {
+                        let text = Text::new("Key / instructions (optional):").prompt()?;
+                        let choice = Text::new(
+                            "Choice JSON path (optional, default /answers/choice/choice):",
+                        )
+                        .prompt()?;
+                        (optional_input(text), optional_input(choice))
+                    } else {
+                        (Some(Text::new("Key to click:").prompt()?), None)
+                    };
+                    Action::Click(ClickAction {
+                        key,
+                        jev: if use_jev { Some(true) } else { None },
+                        choice,
+                    })
                 }
                 "llm" => {
                     let prompt = Text::new("LLM Prompt:").prompt()?;
@@ -102,10 +117,14 @@ pub async fn execute_task() -> anyhow::Result<()> {
         }
     }
 
-    let mut config = AppConfig { task: Vec::new() };
+    let mut config = AppConfig {
+        jev: None,
+        task: Vec::new(),
+    };
     if let Ok(content) = fs::read_to_string("tasks.toml")
         && let Ok(mut existing_config) = toml::from_str::<AppConfig>(&content)
     {
+        config.jev = existing_config.jev;
         config.task.append(&mut existing_config.task);
     }
 

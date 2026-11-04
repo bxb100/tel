@@ -1,4 +1,5 @@
-use crate::config::{Action, ClickAction, DiceAction, TextAction};
+use crate::ast;
+use crate::config::{Action, ClickAction, DICE_EMOTICONS, DiceAction, TextAction};
 use anyhow::{Context, Result, bail, ensure};
 use grammers_client::Client;
 use grammers_client::session::types::PeerRef;
@@ -58,9 +59,11 @@ async fn request_llm_action(prompt: &str) -> Result<Action> {
                                     "text": { "type": "string" },
                                     "dice": {
                                         "type": "string",
-                                        "enum": ["🎲", "🏀", "🎯", "⚽", "🎳", "🎰"]
+                                        "enum": DICE_EMOTICONS
                                     },
-                                    "key": { "type": "string" }
+                                    "key": { "type": "string" },
+                                    "jev": { "type": "boolean" },
+                                    "choice": { "type": "string" }
                                 },
                                 "additionalProperties": true
                             }
@@ -102,10 +105,12 @@ async fn request_llm_action(prompt: &str) -> Result<Action> {
 }
 
 fn parse_llm_action(payload: serde_json::Value) -> Result<Action> {
-    let arguments = payload
-        .pointer("/choices/0/message/tool_calls/0/function/arguments")
-        .and_then(|value| value.as_str())
-        .context("llm response did not include task_action tool arguments")?;
+    let arguments_path =
+        ast::parse_json_path("/choices/0/message/tool_calls/0/function/arguments")?;
+    let arguments = ast::eval(&arguments_path, &payload)
+        .context("llm response did not include task_action tool arguments")?
+        .as_str()
+        .context("llm task_action tool arguments are not a string")?;
     let arguments = serde_json::from_str::<serde_json::Value>(arguments)
         .context("failed to parse task_action arguments")?;
 
@@ -136,15 +141,20 @@ fn parse_llm_action(payload: serde_json::Value) -> Result<Action> {
                 })
             })
             .context("task_action.options.dice is required for dice action"),
-        "click" => options
-            .get("key")
-            .and_then(|value| value.as_str())
-            .map(|key| {
-                Action::Click(ClickAction {
-                    key: key.to_string(),
-                })
-            })
-            .context("task_action.options.key is required for click action"),
+        "click" => {
+            let click = ClickAction {
+                key: options
+                    .get("key")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                jev: options.get("jev").and_then(|value| value.as_bool()),
+                choice: options
+                    .get("choice")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+            };
+            Ok(Action::Click(click))
+        }
         other => bail!("unsupported llm action_type: {other}"),
     }
 }
