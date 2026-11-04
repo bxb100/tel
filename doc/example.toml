@@ -46,3 +46,13 @@ actions = [
     { id = "hello", mapper = { msg = "data" }, text = { text = "hello" } },
     { text = { text = "刚才发送了: {{ctx.hello.msg}}" } },
 ]
+
+[[task]]
+name = "jev_choice_example"
+chat_id = "1122334455"
+chat_name = "@verify_bot"
+actions = [
+    { text = { text = "/verify" } },
+    # Uses System One API to automatically select the matching inline button based on message text.
+    { click = { jev = true } },
+]

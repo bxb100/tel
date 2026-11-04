@@ -1,11 +1,36 @@
 use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::fmt::Debug;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+pub const DICE_EMOTICONS: [&str; 6] = ["🎲", "🏀", "🎯", "⚽", "🎳", "🎰"];
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct AppConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<JevOptions>,
     #[serde(default)]
     pub task: Vec<Task>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct JevOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<String>,
+}
+
+impl JevOptions {
+    pub fn is_empty(&self) -> bool {
+        self.api_key.is_none()
+            && self.base_url.is_none()
+            && self.model.is_none()
+            && self.choice.is_none()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -154,7 +179,23 @@ pub struct DiceAction {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ClickAction {
-    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<String>,
+}
+
+impl ClickAction {
+    pub fn key_text(&self) -> Option<&str> {
+        self.key.as_deref().filter(|key| !key.trim().is_empty())
+    }
+
+    pub fn is_jev(&self, global_enabled: bool) -> bool {
+        self.jev
+            .unwrap_or(global_enabled && self.key_text().is_none())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -183,6 +224,23 @@ pub struct BrowserlessAction {
 
 pub fn to_inline_toml(config: &AppConfig) -> String {
     let mut output = String::new();
+
+    if let Some(jev) = &config.jev {
+        output.push_str("[jev]\n");
+        if let Some(api_key) = &jev.api_key {
+            push_string_field(&mut output, "api_key", api_key);
+        }
+        if let Some(base_url) = &jev.base_url {
+            push_string_field(&mut output, "base_url", base_url);
+        }
+        if let Some(model) = &jev.model {
+            push_string_field(&mut output, "model", model);
+        }
+        if let Some(choice) = &jev.choice {
+            push_string_field(&mut output, "choice", choice);
+        }
+        output.push('\n');
+    }
 
     for task in &config.task {
         output.push_str("[[task]]\n");
@@ -258,8 +316,18 @@ fn push_inline_action(output: &mut String, action: &Action) {
             output.push_str(" }");
         }
         Action::Click(click) => {
-            output.push_str("click = { key = ");
-            output.push_str(&toml_string(&click.key));
+            output.push_str("click = { ");
+            let mut parts = Vec::new();
+            if let Some(key) = &click.key {
+                parts.push(format!("key = {}", toml_string(key)));
+            }
+            if let Some(jev) = click.jev {
+                parts.push(format!("jev = {jev}"));
+            }
+            if let Some(choice) = &click.choice {
+                parts.push(format!("choice = {}", toml_string(choice)));
+            }
+            output.push_str(&parts.join(", "));
             output.push_str(" }");
         }
         Action::Llm(llm) => {
@@ -320,7 +388,7 @@ fn toml_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, AppConfig, to_inline_toml};
+    use super::{Action, AppConfig, ClickAction, to_inline_toml};
 
     #[test]
     fn parses_inline_actions_with_task_schedule() {
@@ -632,5 +700,85 @@ mod tests {
         .expect_err("action-level schedule fields should be rejected");
 
         assert!(error.to_string().contains("cron"));
+    }
+
+    #[test]
+    fn parses_global_jev_table() {
+        let config = toml::from_str::<AppConfig>(
+            r#"
+            [jev]
+            api_key = "test_key"
+            base_url = "https://custom.api/v1"
+            model = "jev-1.14"
+
+            [[task]]
+            name = "test"
+            chat_id = "123"
+            actions = [
+              { click = { key = "Button", jev = false } },
+            ]
+            "#,
+        )
+        .expect("config with jev table should parse");
+
+        assert!(config.jev.is_some());
+        let Action::Click(click) = &config.task[0].actions[0].action else {
+            panic!()
+        };
+        assert_eq!(click.jev, Some(false));
+
+        let output = to_inline_toml(&config);
+        assert!(output.contains("[jev]\n"));
+        assert!(output.contains("api_key = \"test_key\""));
+        assert!(output.contains("jev = false"));
+    }
+
+    #[test]
+    fn parses_click_choice_option() {
+        let config = toml::from_str::<AppConfig>(
+            r#"
+            [jev]
+            choice = "/answers/choice/choice"
+
+            [[task]]
+            name = "test"
+            chat_id = "123"
+            actions = [
+              { click = { jev = true, choice = "/result/answers/choice/choice" } },
+            ]
+            "#,
+        )
+        .expect("config with choice option should parse");
+
+        assert_eq!(
+            config.jev.as_ref().unwrap().choice.as_deref(),
+            Some("/answers/choice/choice")
+        );
+        let Action::Click(click) = &config.task[0].actions[0].action else {
+            panic!()
+        };
+        assert_eq!(
+            click.choice.as_deref(),
+            Some("/result/answers/choice/choice")
+        );
+
+        let output = to_inline_toml(&config);
+        assert!(output.contains("choice = \"/result/answers/choice/choice\""));
+        assert!(output.contains("choice = \"/answers/choice/choice\""));
+    }
+
+    #[test]
+    fn click_jev_inherits_global_only_without_key() {
+        let click = |key: Option<&str>, jev: Option<bool>| ClickAction {
+            key: key.map(str::to_string),
+            jev,
+            choice: None,
+        };
+
+        assert!(click(None, None).is_jev(true));
+        assert!(!click(Some("OK"), None).is_jev(true));
+        assert!(!click(None, Some(false)).is_jev(true));
+        assert!(click(Some("instructions"), Some(true)).is_jev(false));
+        assert!(!click(None, None).is_jev(false));
     }
 }

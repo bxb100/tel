@@ -31,7 +31,7 @@ action 条目支持 `id` 与 `mapper` 元字段：
 
 ## mapper（所有 action 通用）
 
-`mapper` 是 action 条目级配置，只表示如何把该 action 的输出转换为 k:v 存储，每条是 `key = "json_path"`（相对 `data` 的点分路径，可带可不带 `data.` 前缀）：
+`mapper` 是 action 条目级配置，只表示如何把该 action 的输出转换为 k:v 存储，每条是 `key = "json_path"`（相对 `data` 的路径，可带可不带 `data.` 前缀）。路径同时支持点分写法与 JSON Pointer 写法（如 `/data/text/text`）：
 
 ```toml
 # browserless action: 提取 BQL 响应字段
