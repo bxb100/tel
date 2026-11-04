@@ -87,6 +87,55 @@ pub fn parse_expr(src: &str) -> Result<Expr> {
     }
 }
 
+/// Parses a configured JSON path.
+///
+/// Both dotted paths (`a.b[0]`, `$.a.b`) and JSON Pointer paths
+/// (`/a/b/0`) are accepted so every config field can use the same syntax.
+pub fn parse_json_path(src: &str) -> Result<Expr> {
+    let src = src.trim();
+    if let Some(pointer) = src.strip_prefix('/') {
+        return parse_json_pointer(pointer);
+    }
+
+    let src = src
+        .strip_prefix("$.")
+        .or_else(|| src.strip_prefix('$'))
+        .unwrap_or(src);
+    parse_expr(src)
+}
+
+fn parse_json_pointer(src: &str) -> Result<Expr> {
+    if src.is_empty() {
+        bail!("expected a path after `/`");
+    }
+
+    let segs = src
+        .split('/')
+        .map(|raw| {
+            let token = raw.replace("~1", "/").replace("~0", "~");
+            if token.is_empty() {
+                bail!("empty segment in JSON path `/{src}`");
+            }
+            match token.parse::<usize>() {
+                Ok(index) => Ok(Seg::Index(index)),
+                Err(_) => Ok(Seg::Key(token)),
+            }
+        })
+        .collect::<Result<_>>()?;
+
+    Ok(Expr::Path(segs))
+}
+
+/// Parses a mapper path, which is relative to an action's `data` value.
+/// A leading `data` segment is accepted for readability.
+pub fn parse_data_path(src: &str) -> Result<Expr> {
+    let Expr::Path(mut segs) = parse_json_path(src)?;
+    if matches!(segs.first(), Some(Seg::Key(key)) if key == "data") {
+        segs.remove(0);
+    }
+    Ok(Expr::Path(segs))
+}
+
 impl Parser<'_> {
     fn ws(&mut self) {
         while self.chars.next_if(|c| c.is_whitespace()).is_some() {}
@@ -267,6 +316,32 @@ mod tests {
         let ctx = json!({ "a": { "b": [10, 20] } });
         let value = eval(&parse_expr("a.b[1]").unwrap(), &ctx).unwrap();
         assert!(std::ptr::eq(value, &ctx["a"]["b"][1]));
+    }
+
+    #[test]
+    fn json_paths_accept_dotted_and_pointer_syntax() {
+        let ctx = json!({ "a": { "b": [{ "c": "deep" }] } });
+
+        for path in ["a.b[0].c", "$.a.b[0].c", "/a/b/0/c"] {
+            let value = eval(&parse_json_path(path).unwrap(), &ctx).unwrap();
+            assert_eq!(value, "deep", "path was {path}");
+        }
+    }
+
+    #[test]
+    fn data_paths_accept_an_optional_data_prefix() {
+        let ctx = json!({ "text": { "text": "code" } });
+
+        for path in [
+            "text.text",
+            "data.text.text",
+            "$.data.text.text",
+            "/data/text/text",
+        ] {
+            let value = eval(&parse_data_path(path).unwrap(), &ctx).unwrap();
+            assert_eq!(value, "code", "path was {path}");
+        }
+        assert_eq!(eval(&parse_data_path("data").unwrap(), &ctx).unwrap(), &ctx);
     }
 
     #[test]

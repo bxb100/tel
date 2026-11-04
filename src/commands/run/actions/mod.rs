@@ -14,7 +14,7 @@ mod click;
 mod llm;
 
 use crate::ast;
-use crate::config::Action;
+use crate::config::{Action, JevOptions};
 use crate::miniapp;
 use anyhow::{Context, Result, anyhow, bail};
 use grammers_client::Client;
@@ -29,12 +29,21 @@ pub(super) struct TaskContext {
     /// The most recent message sent by a `text` / `dice` action (read by
     /// `click`). Kept apart from `state` because a message is not a k:v value.
     pub last_message: Option<Message>,
+    pub global_jev: Option<JevOptions>,
     /// Every completed action's output map keyed by action id. This is also
     /// the `ctx` root the templates resolve against.
     state: serde_json::Map<String, serde_json::Value>,
 }
 
 impl TaskContext {
+    pub(super) fn new(global_jev: Option<JevOptions>) -> Self {
+        Self {
+            last_message: None,
+            global_jev,
+            state: serde_json::Map::new(),
+        }
+    }
+
     /// Records `output` under `id`, after applying the entry's `mapper`.
     pub(super) fn record_output(
         &mut self,
@@ -62,12 +71,8 @@ fn apply_mapper(
 ) -> Result<()> {
     let source = data["data"].clone();
     for (key, path) in mapper {
-        let path = path
-            .strip_prefix("data.")
-            .or_else(|| path.strip_prefix("$."))
-            .unwrap_or(path);
         let value = dig_json(&source, path)
-            .with_context(|| format!("mapper `{key}`: path `{path}` not found in the output"))?;
+            .with_context(|| format!("mapper `{key}`: cannot resolve path `{path}`"))?;
         data.insert(key.clone(), serde_json::Value::String(value));
     }
     Ok(())
@@ -120,11 +125,10 @@ fn walk(value: &Value, ctx: &Value) -> Result<Value> {
     })
 }
 
-/// Resolves a mapper `json_path` against an output `data` value, or `None`
-/// when the path does not resolve.
-fn dig_json(json: &Value, path: &str) -> Option<String> {
-    let expr = ast::parse_expr(path).ok()?;
-    ast::eval(&expr, json).ok().map(ast::stringify_terminal)
+/// Resolves a mapper `json_path` against an output `data` value.
+fn dig_json(json: &Value, path: &str) -> Result<String> {
+    let expr = ast::parse_data_path(path)?;
+    ast::eval(&expr, json).map(ast::stringify_terminal)
 }
 
 pub(super) async fn execute_action(
@@ -155,9 +159,14 @@ pub(super) async fn execute_action(
         }
         Action::Click(click) => {
             let previous_message = context.last_message.clone();
-            let outcome =
-                click::click_inline_keyboard(client, peer, &click.key, previous_message.as_ref())
-                    .await?;
+            let outcome = click::click_inline_keyboard(
+                client,
+                peer,
+                click,
+                context.global_jev.as_ref(),
+                previous_message.as_ref(),
+            )
+            .await?;
             let value = match outcome {
                 click::ClickOutcome::Answer(answer) => answer.unwrap_or_default(),
                 click::ClickOutcome::Url(url) => url,
@@ -228,6 +237,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(context.state["scrape"]["code"], "deep");
+    }
+
+    #[test]
+    fn mapper_data_path_extracts_the_whole_data_value() {
+        let mut context = TaskContext::default();
+        let mapper = BTreeMap::from([("msg".to_string(), "data".to_string())]);
+
+        context
+            .record_output("hello", &mapper, output("hello"))
+            .unwrap();
+
+        assert_eq!(context.state["hello"]["msg"], "hello");
+    }
+
+    #[test]
+    fn mapper_accepts_json_pointer_paths() {
+        let mut context = TaskContext::default();
+        let mapper = BTreeMap::from([("code".to_string(), "/data/text/text".to_string())]);
+
+        context
+            .record_output(
+                "scrape",
+                &mapper,
+                output(serde_json::json!({ "text": { "text": "123456" } })),
+            )
+            .unwrap();
+
+        assert_eq!(context.state["scrape"]["code"], "123456");
     }
 
     #[test]
@@ -485,6 +522,6 @@ mod tests {
     fn dig_json_walks_nested_paths() {
         let json = json!({ "a": { "b": { "c": "deep" } } });
         assert_eq!(dig_json(&json, "a.b.c").unwrap(), "deep");
-        assert!(dig_json(&json, "a.missing").is_none());
+        assert!(dig_json(&json, "a.missing").is_err());
     }
 }

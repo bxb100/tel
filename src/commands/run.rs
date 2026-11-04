@@ -27,7 +27,7 @@ pub async fn execute(
     let session_path = resolve_session_path(user, session_path)?;
 
     let connection = TelegramConnection::open(&session_path).await?;
-    let result = run_tasks(&connection.client, tasks).await;
+    let result = run_tasks(&connection.client, &config, tasks).await;
     connection.shutdown().await;
     result
 }
@@ -104,14 +104,14 @@ fn stored_session_path(session: SessionData) -> Result<PathBuf> {
     Ok(path)
 }
 
-async fn run_tasks(client: &Client, tasks: Vec<&Task>) -> Result<()> {
+async fn run_tasks(client: &Client, config: &AppConfig, tasks: Vec<&Task>) -> Result<()> {
     ensure!(
         client.is_authorized().await?,
         "Telegram session is not authorized"
     );
 
     for task in tasks {
-        if let Err(error) = run_task(client, task).await {
+        if let Err(error) = run_task(client, config, task).await {
             error!("task {} failed: {}", task.name, error);
         } else {
             info!("✔️ Done!");
@@ -121,7 +121,7 @@ async fn run_tasks(client: &Client, tasks: Vec<&Task>) -> Result<()> {
     Ok(())
 }
 
-async fn run_task(client: &Client, task: &Task) -> Result<()> {
+async fn run_task(client: &Client, config: &AppConfig, task: &Task) -> Result<()> {
     ensure!(
         !task.actions.is_empty(),
         "task {} has no action entries",
@@ -131,7 +131,7 @@ async fn run_task(client: &Client, task: &Task) -> Result<()> {
     let peer = resolve_task_peer(client, task).await?;
     wait_for_task_trigger(task).await?;
 
-    let mut context = TaskContext::default();
+    let mut context = TaskContext::new(config.jev.clone());
 
     for (index, entry) in task.actions.iter().enumerate() {
         // id defaults to the 0-based action index when not configured.
