@@ -16,8 +16,8 @@ mod llm;
 use crate::ast;
 use crate::config::{Action, JevOptions};
 use crate::miniapp;
+use crate::telegram::TelegramConnection;
 use anyhow::{Context, Result, anyhow, bail};
-use grammers_client::Client;
 use grammers_client::message::{InputMessage, Message};
 use grammers_client::session::types::PeerRef;
 use grammers_client::tl;
@@ -132,11 +132,12 @@ fn dig_json(json: &Value, path: &str) -> Result<String> {
 }
 
 pub(super) async fn execute_action(
-    client: &Client,
+    connection: &TelegramConnection,
     peer: PeerRef,
     action: &Action,
     context: &mut TaskContext,
 ) -> Result<OutputValue> {
+    let client = &connection.client;
     match action {
         Action::Text(text) => {
             let message = client.send_message(peer, text.text.as_str()).await?;
@@ -160,7 +161,7 @@ pub(super) async fn execute_action(
         Action::Click(click) => {
             let previous_message = context.last_message.clone();
             let outcome = click::click_inline_keyboard(
-                client,
+                connection,
                 peer,
                 click,
                 context.global_jev.as_ref(),
@@ -175,7 +176,7 @@ pub(super) async fn execute_action(
                 data: output_data(value),
             })
         }
-        Action::Llm(llm) => llm::execute_llm_action(client, peer, &llm.prompt, context).await,
+        Action::Llm(llm) => llm::execute_llm_action(connection, peer, &llm.prompt, context).await,
         Action::Browserless(browserless) => {
             let mut variables = browserless.variables.clone();
             for value in variables.values_mut() {

@@ -2,9 +2,11 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use grammers_client::sender::SenderPoolFatHandle;
+use anyhow::{Context, Result, anyhow};
+use grammers_client::sender::{SenderPoolFatHandle, UpdatesConfiguration};
+use grammers_client::update::Update;
 use grammers_client::{Client, SenderPool};
+use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 
 use crate::session_store::RusqliteSession;
@@ -12,9 +14,12 @@ use crate::session_store::RusqliteSession;
 const DEFAULT_API_ID: i32 = 9911045;
 const DEFAULT_API_HASH: &str = "45ae393448c97ddbd6c74d02b31ea024";
 const SESSION_DIR: &str = ".tel/sessions";
+const UPDATE_BUFFER: usize = 64;
 
 pub struct TelegramConnection {
     pub client: Client,
+    pub updates: Mutex<broadcast::Receiver<Update>>,
+    updates_task: JoinHandle<()>,
     handle: SenderPoolFatHandle,
     runner_task: JoinHandle<()>,
 }
@@ -29,12 +34,30 @@ impl TelegramConnection {
                 )
             },
         )?);
-        let SenderPool { runner, handle, .. } = SenderPool::new(Arc::clone(&session), api_id()?);
+        let SenderPool {
+            runner,
+            handle,
+            updates,
+        } = SenderPool::new(Arc::clone(&session), api_id()?);
         let client = Client::new(handle.clone());
         let runner_task = tokio::spawn(runner.run());
+        let mut stream = client
+            .stream_updates(updates, UpdatesConfiguration::default())
+            .await
+            .map_err(|err| anyhow!("failed to start the update stream: {err}"))?;
+        let (updates_tx, updates_rx) = broadcast::channel(UPDATE_BUFFER);
+        let updates_task = tokio::spawn(async move {
+            while let Ok(update) = stream.next().await {
+                if updates_tx.send(update).is_err() {
+                    break;
+                }
+            }
+        });
 
         Ok(Self {
             client,
+            updates: Mutex::new(updates_rx),
+            updates_task,
             handle,
             runner_task,
         })
@@ -43,6 +66,8 @@ impl TelegramConnection {
     pub async fn shutdown(self) {
         self.handle.quit();
         let _ = self.runner_task.await;
+        self.updates_task.abort();
+        let _ = self.updates_task.await;
     }
 }
 

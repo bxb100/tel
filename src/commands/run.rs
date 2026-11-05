@@ -27,7 +27,7 @@ pub async fn execute(
     let session_path = resolve_session_path(user, session_path)?;
 
     let connection = TelegramConnection::open(&session_path).await?;
-    let result = run_tasks(&connection.client, &config, tasks).await;
+    let result = run_tasks(&connection, &config, tasks).await;
     connection.shutdown().await;
     result
 }
@@ -104,14 +104,18 @@ fn stored_session_path(session: SessionData) -> Result<PathBuf> {
     Ok(path)
 }
 
-async fn run_tasks(client: &Client, config: &AppConfig, tasks: Vec<&Task>) -> Result<()> {
+async fn run_tasks(
+    connection: &TelegramConnection,
+    config: &AppConfig,
+    tasks: Vec<&Task>,
+) -> Result<()> {
     ensure!(
-        client.is_authorized().await?,
+        connection.client.is_authorized().await?,
         "Telegram session is not authorized"
     );
 
     for task in tasks {
-        if let Err(error) = run_task(client, config, task).await {
+        if let Err(error) = run_task(connection, config, task).await {
             error!("task {} failed: {}", task.name, error);
         } else {
             info!("✔️ Done!");
@@ -121,14 +125,14 @@ async fn run_tasks(client: &Client, config: &AppConfig, tasks: Vec<&Task>) -> Re
     Ok(())
 }
 
-async fn run_task(client: &Client, config: &AppConfig, task: &Task) -> Result<()> {
+async fn run_task(connection: &TelegramConnection, config: &AppConfig, task: &Task) -> Result<()> {
     ensure!(
         !task.actions.is_empty(),
         "task {} has no action entries",
         task.name
     );
 
-    let peer = resolve_task_peer(client, task).await?;
+    let peer = resolve_task_peer(&connection.client, task).await?;
     wait_for_task_trigger(task).await?;
 
     let mut context = TaskContext::new(config.jev.clone());
@@ -138,7 +142,7 @@ async fn run_task(client: &Client, config: &AppConfig, task: &Task) -> Result<()
         let id = entry.id.clone().unwrap_or_else(|| index.to_string());
 
         let rendered = render_action(&entry.action, &context)?;
-        let output = execute_action(client, peer, &rendered, &mut context).await?;
+        let output = execute_action(connection, peer, &rendered, &mut context).await?;
         context.record_output(&id, &entry.mapper, output)?;
 
         if let Some(sleep) = apply_delay(task).await {

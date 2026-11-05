@@ -1,7 +1,7 @@
 use crate::ast;
 use crate::config::{Action, ClickAction, DICE_EMOTICONS, DiceAction, TextAction};
+use crate::telegram::TelegramConnection;
 use anyhow::{Context, Result, bail, ensure};
-use grammers_client::Client;
 use grammers_client::session::types::PeerRef;
 use std::env;
 
@@ -11,13 +11,13 @@ use super::{OutputValue, TaskContext, execute_action};
 /// as configured actions so state hand-off (e.g. `click` reading the previous
 /// message) behaves identically.
 pub(super) async fn execute_llm_action(
-    client: &Client,
+    connection: &TelegramConnection,
     peer: PeerRef,
     prompt: &str,
     context: &mut TaskContext,
 ) -> Result<OutputValue> {
     let action = request_llm_action(prompt).await?;
-    Box::pin(execute_action(client, peer, &action, context)).await
+    Box::pin(execute_action(connection, peer, &action, context)).await
 }
 
 async fn request_llm_action(prompt: &str) -> Result<Action> {

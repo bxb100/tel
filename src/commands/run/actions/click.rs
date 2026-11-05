@@ -1,22 +1,25 @@
 use crate::ast;
 use crate::config::{ClickAction, JevOptions};
+use crate::telegram::TelegramConnection;
 use anyhow::{Context, Result, anyhow, bail};
 use grammers_client::Client;
 use grammers_client::message::Message;
-use grammers_client::session::types::PeerRef;
+use grammers_client::session::types::{PeerId, PeerRef};
 use grammers_client::tl;
 use grammers_client::tl::types::InlineButtonTypeUrl;
+use grammers_client::update::Update;
 use serde_json::Value;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::time::{Instant, timeout_at};
 use tracing::{debug, info};
 
 const CLICK_LOOKUP_LIMIT: usize = 30;
-const CLICK_LOOKUP_ATTEMPTS: usize = 15;
-const CLICK_LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
+const CLICK_WAIT: Duration = Duration::from_secs(15);
 const DEFAULT_CHOICE_PATH: &str = "/answers/choice/choice";
 
 /// What a completed `click` action produced.
+#[derive(Debug)]
 pub(super) enum ClickOutcome {
     /// A callback button was clicked; carries the bot's answer text, if it replied.
     Answer(Option<String>),
@@ -25,12 +28,13 @@ pub(super) enum ClickOutcome {
 }
 
 pub(super) async fn click_inline_keyboard(
-    client: &Client,
+    connection: &TelegramConnection,
     peer: PeerRef,
     click: &ClickAction,
     jev: Option<&JevOptions>,
     previous_message: Option<&Message>,
 ) -> Result<ClickOutcome> {
+    let client = &connection.client;
     let key = if click.is_jev(jev.is_some()) {
         None
     } else {
@@ -40,7 +44,7 @@ pub(super) async fn click_inline_keyboard(
                 .context("key is required for click action when jev is not enabled")?,
         )
     };
-    let messages = inline_keyboard_messages(client, peer, previous_message, key).await?;
+    let messages = inline_keyboard_messages(connection, peer, previous_message, key).await?;
 
     if let Some(key) = key {
         click_inline_keyboard_key(client, peer, &messages, key).await
@@ -52,7 +56,7 @@ pub(super) async fn click_inline_keyboard(
 }
 
 async fn inline_keyboard_messages(
-    client: &Client,
+    connection: &TelegramConnection,
     peer: PeerRef,
     previous_message: Option<&Message>,
     key: Option<&str>,
@@ -75,20 +79,25 @@ async fn inline_keyboard_messages(
         return Ok(found);
     }
 
-    for attempt in 0..CLICK_LOOKUP_ATTEMPTS {
-        found.truncate(if previous.is_some() { 1 } else { 0 });
-        let mut messages = client.iter_messages(peer).limit(CLICK_LOOKUP_LIMIT);
-        while let Some(message) = messages.next().await? {
-            if !extract_inline_buttons(message.reply_markup().as_ref()).is_empty() {
-                found.push(message);
-            }
-        }
-        if ready(&found) {
-            return Ok(found);
-        }
+    found.extend(recent_inline_keyboards(&connection.client, peer).await?);
+    if ready(&found) {
+        return Ok(found);
+    }
 
-        if attempt + 1 < CLICK_LOOKUP_ATTEMPTS {
-            sleep(CLICK_LOOKUP_INTERVAL).await;
+    let deadline = Instant::now() + CLICK_WAIT;
+    let mut updates = connection.updates.lock().await;
+    loop {
+        match timeout_at(deadline, updates.recv()).await {
+            Ok(Ok(update)) => {
+                if let Some(message) = inline_keyboard_from_update(update, peer.id) {
+                    found.insert(0, message);
+                    if ready(&found) {
+                        return Ok(found);
+                    }
+                }
+            }
+            Ok(Err(RecvError::Lagged(_))) => {}
+            Ok(Err(RecvError::Closed)) | Err(_) => break,
         }
     }
 
@@ -96,7 +105,32 @@ async fn inline_keyboard_messages(
         return Ok(found);
     }
 
-    bail!("no inline keyboard buttons found in the latest {CLICK_LOOKUP_LIMIT} messages")
+    bail!(
+        "no inline keyboard buttons found in the latest {CLICK_LOOKUP_LIMIT} messages or within {CLICK_WAIT:?}"
+    )
+}
+
+/// Returns the messages with an inline keyboard among the latest [`CLICK_LOOKUP_LIMIT`], newest first.
+async fn recent_inline_keyboards(client: &Client, peer: PeerRef) -> Result<Vec<Message>> {
+    let mut messages = client.iter_messages(peer).limit(CLICK_LOOKUP_LIMIT);
+
+    let mut found = Vec::new();
+    while let Some(message) = messages.next().await? {
+        if !extract_inline_buttons(message.reply_markup().as_ref()).is_empty() {
+            found.push(message);
+        }
+    }
+    Ok(found)
+}
+
+fn inline_keyboard_from_update(update: Update, peer: PeerId) -> Option<Message> {
+    let message = match update {
+        Update::NewMessage(message) | Update::MessageEdited(message) => message.into_inner(),
+        _ => return None,
+    };
+    (message.peer_id() == peer
+        && !extract_inline_buttons(message.reply_markup().as_ref()).is_empty())
+    .then_some(message)
 }
 
 async fn click_with_jev(
@@ -149,8 +183,7 @@ async fn click_with_jev(
 
     match &matched.target {
         InlineButtonMatch::Callback(data) => {
-            let answer = click_inline_callback(client, peer, message.id(), data.clone()).await?;
-            Ok(ClickOutcome::Answer(answer))
+            click_inline_callback(client, peer, message.id(), data.clone()).await
         }
         InlineButtonMatch::Url(url) => Ok(ClickOutcome::Url(url.clone())),
         InlineButtonMatch::Unsupported(text) => {
@@ -303,8 +336,7 @@ async fn click_inline_keyboard_key(
     for message in messages {
         match find_inline_button(message.reply_markup().as_ref(), key) {
             Some(InlineButtonMatch::Callback(data)) => {
-                let answer = click_inline_callback(client, peer, message.id(), data).await?;
-                return Ok(ClickOutcome::Answer(answer));
+                return click_inline_callback(client, peer, message.id(), data).await;
             }
             Some(InlineButtonMatch::Url(url)) => return Ok(ClickOutcome::Url(url)),
             Some(InlineButtonMatch::Unsupported(text)) => unsupported = Some(text),
@@ -326,7 +358,7 @@ async fn click_inline_callback(
     peer: PeerRef,
     message_id: i32,
     data: Vec<u8>,
-) -> Result<Option<String>> {
+) -> Result<ClickOutcome> {
     let answer = client
         .invoke(&tl::functions::messages::GetBotCallbackAnswer {
             game: false,
@@ -336,26 +368,25 @@ async fn click_inline_callback(
             password: None,
         })
         .await?;
-    let text = callback_answer_text(answer)?;
+    callback_answer_outcome(answer)
+}
+
+fn callback_answer_outcome(answer: tl::enums::messages::BotCallbackAnswer) -> Result<ClickOutcome> {
+    let tl::enums::messages::BotCallbackAnswer::Answer(answer) = answer;
+    let text = answer.message.filter(|message| !message.trim().is_empty());
+    if answer.alert {
+        bail!(
+            "click received a modal alert: {}",
+            text.as_deref().unwrap_or("no message")
+        );
+    }
+    if let Some(url) = answer.url {
+        return Ok(ClickOutcome::Url(url));
+    }
     if let Some(text) = text.as_deref() {
         info!("{text}");
     }
-    Ok(text)
-}
-
-fn callback_answer_text(answer: tl::enums::messages::BotCallbackAnswer) -> Result<Option<String>> {
-    match answer {
-        tl::enums::messages::BotCallbackAnswer::Answer(answer) => {
-            let text = answer.message.filter(|message| !message.trim().is_empty());
-            if answer.alert {
-                bail!(
-                    "click received a modal alert: {}",
-                    text.as_deref().unwrap_or("no message")
-                );
-            }
-            Ok(text)
-        }
-    }
+    Ok(ClickOutcome::Answer(text))
 }
 
 enum InlineButtonMatch {
@@ -378,7 +409,7 @@ fn find_inline_button(
 mod tests {
     use grammers_client::tl;
 
-    use super::{InlineButtonMatch, callback_answer_text, find_inline_button};
+    use super::{ClickOutcome, InlineButtonMatch, callback_answer_outcome, find_inline_button};
 
     #[test]
     fn finds_inline_callback_button_by_text() {
@@ -483,10 +514,10 @@ mod tests {
         }
         .into();
 
-        assert_eq!(
-            callback_answer_text(answer).unwrap().as_deref(),
-            Some("checked in")
-        );
+        match callback_answer_outcome(answer).unwrap() {
+            ClickOutcome::Answer(text) => assert_eq!(text.as_deref(), Some("checked in")),
+            ClickOutcome::Url(url) => panic!("expected an answer, got url {url}"),
+        }
     }
 
     #[test]
@@ -501,7 +532,28 @@ mod tests {
         }
         .into();
 
-        assert!(callback_answer_text(answer).unwrap().is_none());
+        match callback_answer_outcome(answer).unwrap() {
+            ClickOutcome::Answer(text) => assert!(text.is_none()),
+            ClickOutcome::Url(url) => panic!("expected an answer, got url {url}"),
+        }
+    }
+
+    #[test]
+    fn returns_the_url_of_a_callback_answer() {
+        let answer = tl::types::messages::BotCallbackAnswer {
+            alert: false,
+            has_url: true,
+            native_ui: false,
+            message: None,
+            url: Some("https://example.com/app".to_string()),
+            cache_time: 0,
+        }
+        .into();
+
+        match callback_answer_outcome(answer).unwrap() {
+            ClickOutcome::Url(url) => assert_eq!(url, "https://example.com/app"),
+            ClickOutcome::Answer(_) => panic!("expected a url"),
+        }
     }
 
     #[test]
@@ -516,7 +568,7 @@ mod tests {
         }
         .into();
 
-        let err = callback_answer_text(answer).unwrap_err().to_string();
+        let err = callback_answer_outcome(answer).unwrap_err().to_string();
         assert!(err.contains("modal alert"), "got: {err}");
         assert!(err.contains("Please verify your account"), "got: {err}");
     }

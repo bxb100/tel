@@ -20,12 +20,12 @@ action 条目支持 `id` 与 `mapper` 元字段：
 
 **每个 action 的输出都是统一的 map 形式**：
 
-| Action | 输出 map |
-| -- | -- |
-| `text` / `dice` | `{ data = "发送的消息文本" }` |
-| `click` | `{ data = "回调应答文本或按钮 URL" }` |
-| `browserless` | `{ data = <BQL 响应 data 对象> }` |
-| `llm` | 其选择的 action 的输出 map |
+| Action          | 输出 map                              |
+| --------------- | ------------------------------------- |
+| `text` / `dice` | `{ data = "发送的消息文本" }`         |
+| `click`         | `{ data = "回调应答文本或按钮 URL" }` |
+| `browserless`   | `{ data = <BQL 响应 data 对象> }`     |
+| `llm`           | 其选择的 action 的输出 map            |
 
 配置了 `mapper` 的任何 action 会在 `data` 之外追加提取的 key。
 
@@ -58,13 +58,13 @@ browserless 执行后输出 map：
 
 任何 action 的任何字符串字段（`text`、`click.key`、`llm.prompt`、`browserless.query/token/operation_name/url`，含未来新增字段）都支持在 `{{ }}` 内写路径表达式：
 
-| 写法 | 含义 |
-| -- | -- |
-| `{{ctx.0.data}}` / `{{ctx.login.data}}` | 该 action 输出 map 的 `data` key |
-| `{{ctx.login.code}}` | mapper 提取的 key |
-| `{{ctx.0.data.goto.status}}` | 按 JSON 路径穿透 `data` 取 BQL 字段 |
-| `{{ctx.0.data.items[0]}}` | 数组下标 |
-| `{{ctx.3.code}}` | 用数字 id（缺省 index）引用 |
+| 写法                                    | 含义                                |
+| --------------------------------------- | ----------------------------------- |
+| `{{ctx.0.data}}` / `{{ctx.login.data}}` | 该 action 输出 map 的 `data` key    |
+| `{{ctx.login.code}}`                    | mapper 提取的 key                   |
+| `{{ctx.0.data.goto.status}}`            | 按 JSON 路径穿透 `data` 取 BQL 字段 |
+| `{{ctx.0.data.items[0]}}`               | 数组下标                            |
+| `{{ctx.3.code}}`                        | 用数字 id（缺省 index）引用         |
 
 ```toml
 { text = { text = "验证码是 {{ctx.scrape.code}}" } }
@@ -105,12 +105,9 @@ browserless 不会隐式接收上一个 action 的结果。需要给 query 传 G
 
 ```toml
 actions = [
-    { id = "page", mapper = { url = "data.reconnect.browserQLEndpoint" },
-      browserless = { token = "T", operation_name = "Go",
-        query = "mutation Go { goto(url: \"https://example.com\") { status } reconnect(timeout: 30000) { browserQLEndpoint } }" } },
-    { text = { text = "/checkin" } },                       # 不影响 session
-    { browserless = { token = "T", operation_name = "S", url = "{{ ctx.page.url }}",
-        query = "mutation S { click(selector: \"button\") { time } }" } },   # 复用同一个浏览器
+    { id = "page", mapper = { url = "data.reconnect.browserQLEndpoint" }, browserless = { token = "T", operation_name = "Go", query = "mutation Go { goto(url: \"https://example.com\") { status } reconnect(timeout: 30000) { browserQLEndpoint } }" } },
+    { text = { text = "/checkin" } }, # 不影响 session
+    { browserless = { token = "T", operation_name = "S", url = "{{ ctx.page.url }}", query = "mutation S { click(selector: \"button\") { time } }" } }, # 复用同一个浏览器
 ]
 ```
 
