@@ -24,7 +24,7 @@ use grammers_client::tl;
 use serde_json::Value;
 
 /// Persistent state shared across all actions in a task.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(super) struct TaskContext {
     /// The most recent message sent by a `text` / `dice` action (read by
     /// `click`). Kept apart from `state` because a message is not a k:v value.

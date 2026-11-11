@@ -140,8 +140,10 @@ async fn run_task(connection: &TelegramConnection, config: &AppConfig, task: &Ta
     for (index, entry) in task.actions.iter().enumerate() {
         // id defaults to the 0-based action index when not configured.
         let id = entry.id.clone().unwrap_or_else(|| index.to_string());
-
         let rendered = render_action(&entry.action, &context)?;
+
+        debug!("Action: ${id}, Request: ${rendered:#?}");
+
         let output = execute_action(connection, peer, &rendered, &mut context).await?;
         context.record_output(&id, &entry.mapper, output)?;
 
@@ -149,7 +151,7 @@ async fn run_task(connection: &TelegramConnection, config: &AppConfig, task: &Ta
             debug!(
                 "Waiting {sleep}s before execute {action:?}",
                 action = entry.action
-            )
+            );
         }
     }
 
