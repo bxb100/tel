@@ -774,8 +774,8 @@ dependencies = [
  "futures-util",
  "grammers-crypto",
  "grammers-mtsender",
- "grammers-session",
- "grammers-tl-types",
+ "grammers-session 0.11.0",
+ "grammers-tl-types 0.11.0",
  "jiff",
  "md5",
  "mime_guess",
@@ -811,7 +811,7 @@ dependencies = [
  "flate2",
  "getrandom 0.4.3",
  "grammers-crypto",
- "grammers-tl-types",
+ "grammers-tl-types 0.11.0",
  "num-bigint",
  "sha1",
  "tracing",
@@ -825,8 +825,8 @@ dependencies = [
  "bytes",
  "grammers-crypto",
  "grammers-mtproto",
- "grammers-session",
- "grammers-tl-types",
+ "grammers-session 0.11.0",
+ "grammers-tl-types 0.11.0",
  "locate-locale",
  "os_info",
  "tokio",
@@ -838,8 +838,17 @@ name = "grammers-session"
 version = "0.11.0"
 source = "git+https://codeberg.org/Lonami/grammers.git?rev=15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3#15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3"
 dependencies = [
- "grammers-tl-types",
+ "grammers-tl-types 0.11.0",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "grammers-session"
+version = "0.12.0"
+source = "git+https://codeberg.org/Lonami/grammers.git?rev=e61cf8585e1e9969ab81eda9fb4725a1500e2d86#e61cf8585e1e9969ab81eda9fb4725a1500e2d86"
+dependencies = [
+ "grammers-tl-types 0.12.0",
  "tracing",
 ]
 
@@ -848,7 +857,15 @@ name = "grammers-tl-gen"
 version = "0.11.0"
 source = "git+https://codeberg.org/Lonami/grammers.git?rev=15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3#15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3"
 dependencies = [
- "grammers-tl-parser",
+ "grammers-tl-parser 1.2.2",
+]
+
+[[package]]
+name = "grammers-tl-gen"
+version = "0.12.0"
+source = "git+https://codeberg.org/Lonami/grammers.git?rev=e61cf8585e1e9969ab81eda9fb4725a1500e2d86#e61cf8585e1e9969ab81eda9fb4725a1500e2d86"
+dependencies = [
+ "grammers-tl-parser 2.0.0",
 ]
 
 [[package]]
@@ -860,12 +877,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "grammers-tl-parser"
+version = "2.0.0"
+source = "git+https://codeberg.org/Lonami/grammers.git?rev=e61cf8585e1e9969ab81eda9fb4725a1500e2d86#e61cf8585e1e9969ab81eda9fb4725a1500e2d86"
+dependencies = [
+ "crc32fast",
+]
+
+[[package]]
 name = "grammers-tl-types"
 version = "0.11.0"
 source = "git+https://codeberg.org/Lonami/grammers.git?rev=15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3#15b7afa46a9c6853aa9d8efc9d70a0f46b1781c3"
 dependencies = [
- "grammers-tl-gen",
- "grammers-tl-parser",
+ "grammers-tl-gen 0.11.0",
+ "grammers-tl-parser 1.2.2",
+]
+
+[[package]]
+name = "grammers-tl-types"
+version = "0.12.0"
+source = "git+https://codeberg.org/Lonami/grammers.git?rev=e61cf8585e1e9969ab81eda9fb4725a1500e2d86#e61cf8585e1e9969ab81eda9fb4725a1500e2d86"
+dependencies = [
+ "grammers-tl-gen 0.12.0",
+ "grammers-tl-parser 2.0.0",
 ]
 
 [[package]]
@@ -2437,7 +2471,7 @@ dependencies = [
  "cron",
  "futures",
  "grammers-client",
- "grammers-session",
+ "grammers-session 0.12.0",
  "inquire",
  "rand 0.10.3",
  "regex-lite",
